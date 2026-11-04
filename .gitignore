@@ -1,0 +1,10 @@
+# Build output & intermediate files
+[Bb]in/
+[Oo]bj/
+[Ll]ib/
+
+# Visual Studio / VS Code / Rider files
+.vs/
+.vscode/
+*.user
+*.suo
