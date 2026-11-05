@@ -152,6 +152,7 @@ namespace ToolSlots
         private static readonly Stack<ItemHandler.ItemType> ActiveForcedToolSlotStack = new Stack<ItemHandler.ItemType>();
         private static int _suppressInventoryToolCheckDepth;
         private static bool _suppressWeaponRedirect;
+        private static bool _suppressToolSlotRedirect;
 
         private void Awake()
         {
@@ -371,6 +372,124 @@ namespace ToolSlots
                 default:
                     return "Tool Slot";
             }
+        }
+
+        public static string GetNormalSlotDisplayName(ItemHandler.ItemType slotType)
+        {
+            switch (slotType)
+            {
+                case ItemHandler.ItemType.weapon:
+                    return "Weapon Slot";
+                case ItemHandler.ItemType.shield:
+                    return "Shield Slot";
+                case ItemHandler.ItemType.head:
+                    return "Head Slot";
+                case ItemHandler.ItemType.armor:
+                    return "Armor Slot";
+                case ItemHandler.ItemType.trinket:
+                    return "Trinket Slot";
+                case ItemHandler.ItemType.bracelet:
+                    return "Bracelet Slot";
+                default:
+                    return "Equipment Slot";
+            }
+        }
+
+        public static void EquipItemToNormalSlot(ItemHandler.Item item, bool fromToolSlot, ItemHandler.ItemType toolSlotType)
+        {
+            if (item == null || Player.instance == null || Player.instance.equipment == null)
+                return;
+
+            int itemId = item.typeId;
+            if (!Player.instance.equipment.CanEquipItem(itemId))
+                return;
+
+            PlayerEquipment.EquipmentSlot normalSlot = Player.instance.equipment.GetSlot(item.itemType);
+            if (normalSlot == null)
+                return;
+
+            if (fromToolSlot)
+            {
+                if (normalSlot.itemId != 0 && UI_Inventory.instance != null && !UI_Inventory.instance.CanAddItem(normalSlot.itemId, 1))
+                {
+                    if (UI_Notifications.instance != null)
+                    {
+                        UI_Notifications.instance.ShowDefaultNotification("Inventory full!", -1f);
+                    }
+                    return;
+                }
+
+                PlayerEquipment.EquipmentSlot toolSlot = GetRawSlot(Player.instance.equipment, toolSlotType);
+                if (toolSlot != null)
+                {
+                    toolSlot.itemId = 0;
+                    if (UI_BottomRightTabs_Equipment.instance != null)
+                    {
+                        UI_BottomRightTabs_Equipment.instance.ChangeEquips();
+                    }
+                }
+
+                _suppressToolSlotRedirect = true;
+                try
+                {
+                    Player.instance.equipment.EquipItem(itemId, skipInventoryCheck: true);
+                }
+                finally
+                {
+                    _suppressToolSlotRedirect = false;
+                }
+
+                if (normalSlot.itemId != itemId && toolSlot != null)
+                {
+                    toolSlot.itemId = itemId;
+                    if (UI_BottomRightTabs_Equipment.instance != null)
+                    {
+                        UI_BottomRightTabs_Equipment.instance.ChangeEquips();
+                    }
+                }
+            }
+            else
+            {
+                _suppressToolSlotRedirect = true;
+                try
+                {
+                    Player.instance.equipment.EquipItem(itemId, skipInventoryCheck: false);
+                }
+                finally
+                {
+                    _suppressToolSlotRedirect = false;
+                }
+            }
+        }
+
+        public static void EquipItemToToolSlotFromNormalSlot(ItemHandler.Item item, ItemHandler.ItemType normalSlotType, ItemHandler.ItemType toolSlotType)
+        {
+            if (item == null || Player.instance == null || Player.instance.equipment == null)
+                return;
+
+            int itemId = item.typeId;
+            EnsureToolSlots(Player.instance.equipment);
+            PlayerEquipment.EquipmentSlot toolSlot = GetRawSlot(Player.instance.equipment, toolSlotType);
+            if (toolSlot == null)
+                return;
+
+            if (toolSlot.itemId != 0 && UI_Inventory.instance != null && !UI_Inventory.instance.CanAddItem(toolSlot.itemId, 1))
+            {
+                if (UI_Notifications.instance != null)
+                {
+                    UI_Notifications.instance.ShowDefaultNotification("Inventory full!", -1f);
+                }
+                return;
+            }
+
+            Player.instance.equipment.UnequipSlot(normalSlotType, addItemToInventory: false);
+
+            if (toolSlot.itemId != 0)
+            {
+                Player.instance.equipment.UnequipSlot(toolSlotType, addItemToInventory: true);
+            }
+
+            Player.instance.equipment.EquipItem(itemId, skipInventoryCheck: true);
         }
 
         public static int GetEmptyToolSlotIconItemId(ItemHandler.ItemType slotType)
@@ -695,6 +814,9 @@ namespace ToolSlots
         {
             private static bool Prefix(PlayerEquipment __instance, int itemId, bool skipInventoryCheck)
             {
+                if (_suppressToolSlotRedirect)
+                    return true;
+
                 if (itemId <= 0 || ItemHandler.instance == null)
                     return true;
 
@@ -1114,13 +1236,13 @@ namespace ToolSlots
             }
         }
 
-        private static void AddCustomMenuButton(UI_RightClickMenu menu, ref int counter, string text, Action<object[]> onClick)
+        private static LUI_Button AddCustomMenuButton(UI_RightClickMenu menu, ref int counter, string text, Action<object[]> onClick)
         {
             if (menu == null || AddButtonMethod == null)
-                return;
+                return null;
 
             Vector2 pos = new Vector2(5f, -5f - counter * 25f);
-            AddButtonMethod(
+            LUI_Button btn = AddButtonMethod(
                 menu,
                 text,
                 pos,
@@ -1130,7 +1252,14 @@ namespace ToolSlots
                     DeactivateRightClickMenuMethod?.Invoke(menu, null);
                 },
                 null);
+
+            if (btn != null && btn.text != null && btn.text.text != null)
+            {
+                btn.text.text.supportRichText = true;
+            }
+
             counter++;
+            return btn;
         }
 
         [HarmonyPatch(typeof(UI_RightClickMenu), "EquipmentSlotOptions")]
@@ -1141,7 +1270,6 @@ namespace ToolSlots
                 if (__instance == null
                     || equipmentSlot == null
                     || equipmentSlot.itemId <= 0
-                    || !IsToolSlotType(equipmentSlot.slotType)
                     || AddButtonMethod == null
                     || ItemHandler.instance == null
                     || UI_Inventory.instance == null)
@@ -1153,26 +1281,55 @@ namespace ToolSlots
                 if (item == null)
                     return;
 
-                UI_Inventory.ItemSlot virtualSlot = CreateVirtualToolItemSlot(equipmentSlot.slotType, equipmentSlot.itemId);
-
-                if (item.abilityId != 0 && ConsumeItemEffectsMethod != null)
+                if (IsToolSlotType(equipmentSlot.slotType))
                 {
+                    UI_Inventory.ItemSlot virtualSlot = CreateVirtualToolItemSlot(equipmentSlot.slotType, equipmentSlot.itemId);
+
+                    if (item.abilityId != 0 && ConsumeItemEffectsMethod != null)
+                    {
+                        AddCustomMenuButton(
+                            __instance,
+                            ref counter,
+                            "Activate <color=#c9c9c9>" + item.itemName + "</color>",
+                            _ => ConsumeItemEffectsMethod(UI_Inventory.instance, virtualSlot));
+                    }
+
                     AddCustomMenuButton(
                         __instance,
                         ref counter,
-                        "Activate <color=#c9c9c9>" + item.itemName,
-                        _ => ConsumeItemEffectsMethod(UI_Inventory.instance, virtualSlot));
-                }
+                        "Use <color=#c9c9c9>" + item.itemName + "</color>",
+                        _ =>
+                        {
+                            UI_Inventory.instance.usingItemSlot = virtualSlot;
+                            UI_Inventory.instance.usingItem = true;
+                            if (UI_BottomRightTabs.instance != null)
+                            {
+                                UI_BottomRightTabs.instance.OpenTab(UI_BottomRightTabs.Inventory);
+                            }
+                        });
 
-                AddCustomMenuButton(
-                    __instance,
-                    ref counter,
-                    "Use <color=#c9c9c9>" + item.itemName,
-                    _ =>
+                    // If equippable in a normal equipment slot as well, offer an option to equip it there
+                    if (item.IsEquippable())
                     {
-                        UI_Inventory.instance.usingItemSlot = virtualSlot;
-                        UI_Inventory.instance.usingItem = true;
-                    });
+                        AddCustomMenuButton(
+                            __instance,
+                            ref counter,
+                            "Equip to " + GetNormalSlotDisplayName(item.itemType),
+                            _ => EquipItemToNormalSlot(item, fromToolSlot: true, equipmentSlot.slotType));
+                    }
+                }
+                else
+                {
+                    // Normal equipment slot (e.g. Weapon, Shield) - if also a tool, offer option to equip to its tool slot
+                    if (TryGetToolSlotType(item, out ItemHandler.ItemType toolSlotType))
+                    {
+                        AddCustomMenuButton(
+                            __instance,
+                            ref counter,
+                            "Equip to " + GetToolSlotDisplayName(toolSlotType),
+                            _ => EquipItemToToolSlotFromNormalSlot(item, equipmentSlot.slotType, toolSlotType));
+                    }
+                }
             }
         }
 
@@ -1197,6 +1354,30 @@ namespace ToolSlots
                 if (targetItem == null)
                     return;
 
+                // If item can be equipped in both a tool slot and a normal equipment slot,
+                // add an option in the right-click menu to equip it to the normal equipment slot as well
+                if (TryGetToolSlotType(targetItem, out ItemHandler.ItemType toolSlotType))
+                {
+                    if (targetItem.IsEquippable())
+                    {
+                        AddCustomMenuButton(
+                            __instance,
+                            ref counter,
+                            "Equip to " + GetNormalSlotDisplayName(targetItem.itemType),
+                            _ => EquipItemToNormalSlot(targetItem, fromToolSlot: false, toolSlotType: default));
+                    }
+                    else
+                    {
+                        // Tools that aren't equippable in normal slots (e.g. Shovel, Tongs, etc.)
+                        // don't have a vanilla "Equip" option in the right-click menu, so provide one.
+                        AddCustomMenuButton(
+                            __instance,
+                            ref counter,
+                            "Equip to " + GetToolSlotDisplayName(toolSlotType),
+                            _ => Player.instance.equipment.EquipItem(targetItem.typeId));
+                    }
+                }
+
                 // If Salvaging Toolkit (2108) is equipped in its tool slot, add a direct "Salvage" option on salvageable items
                 PlayerEquipment.EquipmentSlot salvageSlot = GetRawSlot(Player.instance.equipment, ToolSlotSalvagingToolkit);
                 if (salvageSlot != null
@@ -1207,7 +1388,7 @@ namespace ToolSlots
                     AddCustomMenuButton(
                         __instance,
                         ref counter,
-                        "Salvage <color=#c9c9c9>" + targetItem.itemName,
+                        "Salvage <color=#c9c9c9>" + targetItem.itemName + "</color>",
                         _ => UseItemOnItemMethod(UI_Inventory.instance, virtualSalvageSlot, itemslot));
                 }
 
@@ -1222,7 +1403,7 @@ namespace ToolSlots
                     AddCustomMenuButton(
                         __instance,
                         ref counter,
-                        "Crush <color=#c9c9c9>" + targetItem.itemName,
+                        "Crush <color=#c9c9c9>" + targetItem.itemName + "</color>",
                         _ => UseItemOnItemMethod(UI_Inventory.instance, virtualPestleSlot, itemslot));
                 }
             }

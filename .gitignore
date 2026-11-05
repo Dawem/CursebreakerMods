@@ -8,3 +8,7 @@
 .vscode/
 *.user
 *.suo
+
+# Local Scripts
+*.bat
+*.ps1
