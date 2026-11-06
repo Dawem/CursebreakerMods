@@ -100,6 +100,8 @@ public class Plugin : BaseUnityPlugin
             true,
             "Highlight players when toggle is enabled.");
 
+        ToggleEnabled.SettingChanged += (_, _) => MinimapHighlightButtonPatch.UpdateButtonAppearance();
+
         _harmony.PatchAll();
         Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
     }
@@ -113,143 +115,11 @@ public class Plugin : BaseUnityPlugin
         }
 
         MinimapHighlightButtonPatch.UpdateButtonAppearance();
-        UI_HighlightFilterWindow.Instance?.SyncMasterToggle();
     }
 
     internal static void ToggleHighlightState(bool playSound = true)
     {
         SetToggleState(!ToggleEnabled.Value, playSound);
-    }
-}
-
-public class UI_HighlightFilterWindow : LUI_DragWindow
-{
-    public static UI_HighlightFilterWindow Instance;
-
-    private LUI_ToggleButton _masterToggleButton;
-    private readonly List<(LUI_ToggleButton Button, ConfigEntry<bool> Entry)> _filterButtons = new();
-
-    public static void ToggleConfigWindow()
-    {
-        if (Instance == null)
-        {
-            if (CBUI.instance == null || LUI_Core.instance == null)
-            {
-                return;
-            }
-
-            Instance = CBUI.instance.gameObject.AddComponent<UI_HighlightFilterWindow>();
-        }
-
-        Instance.ToggleWindow();
-        if (Instance.active)
-        {
-            Instance.SyncAllToggles();
-        }
-    }
-
-    public override void SetupWindow()
-    {
-        SetupDragWindow("Highlight Filter Settings", new Vector2(380f, 390f));
-        Transform parent = image_windowbackground.GetParentTransform();
-
-        _masterToggleButton = CreateFilterCheckbox(
-            "Keep Highlights Enabled",
-            new Vector2(24f, -60f),
-            parent,
-            Plugin.ToggleEnabled,
-            isMasterToggle: true);
-
-        float startY = -100f;
-        const float stepY = -30f;
-
-        CreateFilterCheckbox("Dropped Loot", new Vector2(24f, startY), parent, Plugin.HighlightLoot);
-        CreateFilterCheckbox("Harvestable Resources", new Vector2(24f, startY + stepY * 1), parent, Plugin.HighlightResources);
-        CreateFilterCheckbox("Only Harvestable Nodes", new Vector2(48f, startY + stepY * 2), parent, Plugin.HighlightOnlyHarvestableResources);
-        CreateFilterCheckbox("Chests, Banks & Workbenches", new Vector2(24f, startY + stepY * 3), parent, Plugin.HighlightContainersAndStations);
-        CreateFilterCheckbox("Doors & Obstacles", new Vector2(24f, startY + stepY * 4), parent, Plugin.HighlightDoorsAndObstacles);
-        CreateFilterCheckbox("Other Interactables", new Vector2(24f, startY + stepY * 5), parent, Plugin.HighlightOtherInteractables);
-        CreateFilterCheckbox("Friendly NPCs", new Vector2(24f, startY + stepY * 6), parent, Plugin.HighlightFriendlyNpcs);
-        CreateFilterCheckbox("Enemy NPCs", new Vector2(24f, startY + stepY * 7), parent, Plugin.HighlightEnemyNpcs);
-        CreateFilterCheckbox("Players", new Vector2(24f, startY + stepY * 8), parent, Plugin.HighlightPlayers);
-    }
-
-    private LUI_ToggleButton CreateFilterCheckbox(
-        string label,
-        Vector2 pos,
-        Transform parent,
-        ConfigEntry<bool> configEntry,
-        bool isMasterToggle = false)
-    {
-        LUI_ToggleButton toggleButton = LUI_Core.instance.AddToggleButton(
-            label,
-            Position.topLeft,
-            Position.topLeft,
-            pos + new Vector2(0f, 25f),
-            parent,
-            vars =>
-            {
-                var btn = (LUI_ToggleButton)vars[0];
-                btn.Toggle();
-                if (isMasterToggle)
-                {
-                    Plugin.SetToggleState(btn.isOn, playSound: false);
-                }
-                else
-                {
-                    configEntry.Value = btn.isOn;
-                }
-            });
-
-        UnityEngine.UI.Text labelText = toggleButton.spawnedObject != null
-            ? toggleButton.spawnedObject.GetComponentInChildren<UnityEngine.UI.Text>()
-            : null;
-        if (labelText != null)
-        {
-            RectTransform textRect = labelText.rectTransform;
-            textRect.anchoredPosition = new Vector2(28f, 0f);
-            textRect.sizeDelta = new Vector2(300f, 20f);
-        }
-
-        if (configEntry.Value)
-        {
-            toggleButton.Toggle(false);
-        }
-
-        if (!isMasterToggle)
-        {
-            _filterButtons.Add((toggleButton, configEntry));
-        }
-
-        return toggleButton;
-    }
-
-    public void SyncMasterToggle()
-    {
-        if (_masterToggleButton != null && _masterToggleButton.isOn != Plugin.ToggleEnabled.Value)
-        {
-            _masterToggleButton.Toggle(false);
-        }
-    }
-
-    public void SyncAllToggles()
-    {
-        SyncMasterToggle();
-        foreach ((LUI_ToggleButton button, ConfigEntry<bool> entry) in _filterButtons)
-        {
-            if (button != null && button.isOn != entry.Value)
-            {
-                button.Toggle(false);
-            }
-        }
-    }
-
-    private void Update()
-    {
-        if (active)
-        {
-            UpdateDrag();
-        }
     }
 }
 
@@ -275,11 +145,6 @@ public static class MinimapHighlightButtonPatch
             {
                 UpdateHoverTooltip();
             }
-        }, null);
-
-        __instance.image_highlightInteractables.AddRightClickDown(_ =>
-        {
-            UI_HighlightFilterWindow.ToggleConfigWindow();
         }, null);
 
         UpdateButtonAppearance();
@@ -313,7 +178,7 @@ public static class MinimapHighlightButtonPatch
 
         UI_Cursor.instance.SetUIMouseHoverText(
             $"Highlight interactables ({status})\n" +
-            $"Left-click or [{toggleShortcut}]: Toggle | Right-click: Filter Settings | Hold [{holdKey}]: Show All");
+            $"Left-click or [{toggleShortcut}]: Toggle | Hold [{holdKey}]: Show All");
     }
 
     internal static void UpdateButtonAppearance()
@@ -341,44 +206,6 @@ public static class MinimapHighlightButtonPatch
     {
         KeyboardShortcut copy = shortcut;
         return copy.MainKey == KeyCode.None ? "None" : copy.ToString();
-    }
-}
-
-[HarmonyPatch(typeof(UI_Options), "CreateGameplaySettings")]
-public static class OptionsGameplaySettingsPatch
-{
-    private static readonly AccessTools.FieldRef<UI_Options, LUIRect> ContainerContentRef =
-        AccessTools.FieldRefAccess<UI_Options, LUIRect>("container_content");
-
-    private static readonly AccessTools.FieldRef<UI_Options, LUI_ScrollView> ScrollViewRightTabRef =
-        AccessTools.FieldRefAccess<UI_Options, LUI_ScrollView>("scrollView_RightTab");
-
-    [HarmonyPostfix]
-    public static void Postfix(UI_Options __instance)
-    {
-        LUIRect containerContent = ContainerContentRef(__instance);
-        LUI_ScrollView scrollView = ScrollViewRightTabRef(__instance);
-        if (containerContent == null || LUI_Core.instance == null)
-        {
-            return;
-        }
-
-        Transform contentParent = containerContent.GetParentTransform();
-        float currentHeight = scrollView != null
-            ? scrollView.GetContentSize().y
-            : 650f;
-
-        LUI_Core.instance.AddButton(
-            "Highlight Filter Settings",
-            Position.topLeft,
-            Position.topLeft,
-            new Vector2(5f, -(currentHeight - 20f)),
-            new Vector2(230f, 35f),
-            _ => UI_HighlightFilterWindow.ToggleConfigWindow(),
-            null,
-            contentParent);
-
-        scrollView?.SetContentHeight(currentHeight + 45f);
     }
 }
 

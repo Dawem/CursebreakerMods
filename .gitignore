@@ -2,6 +2,7 @@
 [Bb]in/
 [Oo]bj/
 [Ll]ib/
+decompiled/
 
 # Visual Studio / VS Code / Rider files
 .vs/

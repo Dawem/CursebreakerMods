@@ -21,6 +21,8 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> EnableInventory;
     internal static ConfigEntry<bool> EnableEquipment;
     internal static ConfigEntry<bool> EnableBank;
+    internal static ConfigEntry<bool> EnableNPCs;
+    internal static ConfigEntry<bool> EnableMobs;
 
     private static readonly Regex RichTextRegex = new(@"<[^>]+>", RegexOptions.Compiled);
 
@@ -38,7 +40,7 @@ public class Plugin : BaseUnityPlugin
             "General",
             "WikiUrl",
             DefaultWikiUrl,
-            "The wiki URL template used to search for items. '<item name>' is replaced with the item's name with spaces converted to underscores.");
+            "The wiki URL template used to search for items, mobs, and NPCs. '<item name>', '<name>', or '<target name>' is replaced with the target name with spaces converted to underscores.");
 
         MenuText = Config.Bind(
             "General",
@@ -63,6 +65,18 @@ public class Plugin : BaseUnityPlugin
             "EnableBank",
             true,
             "Whether to show the wiki search option when right-clicking items in the bank.");
+
+        EnableNPCs = Config.Bind(
+            "Features",
+            "EnableNPCs",
+            true,
+            "Whether to show the wiki search option when right-clicking NPCs.");
+
+        EnableMobs = Config.Bind(
+            "Features",
+            "EnableMobs",
+            true,
+            "Whether to show the wiki search option when right-clicking mobs / combatants.");
 
         _harmony.PatchAll();
 
@@ -112,18 +126,18 @@ public class Plugin : BaseUnityPlugin
     }
 
     /// <summary>
-    /// Builds the target wiki URL by replacing spaces with underscores in the item name
+    /// Builds the target wiki URL by replacing spaces with underscores in the target name
     /// and inserting it into the configured URL template. Rich text tags (e.g. &lt;color&gt;) are stripped.
     /// </summary>
-    public static string BuildWikiUrl(string pattern, string rawItemName)
+    public static string BuildWikiUrl(string pattern, string rawTargetName)
     {
         if (string.IsNullOrWhiteSpace(pattern))
             pattern = DefaultWikiUrl;
 
-        if (string.IsNullOrWhiteSpace(rawItemName))
+        if (string.IsNullOrWhiteSpace(rawTargetName))
             return pattern;
 
-        string cleanName = StripRichTextTags(rawItemName).Trim();
+        string cleanName = StripRichTextTags(rawTargetName).Trim();
         if (string.IsNullOrWhiteSpace(cleanName))
             return pattern;
 
@@ -134,12 +148,51 @@ public class Plugin : BaseUnityPlugin
             return Regex.Replace(pattern, "<item name>", formattedName, RegexOptions.IgnoreCase);
         }
 
+        if (pattern.IndexOf("<target name>", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return Regex.Replace(pattern, "<target name>", formattedName, RegexOptions.IgnoreCase);
+        }
+
+        if (pattern.IndexOf("<npc name>", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return Regex.Replace(pattern, "<npc name>", formattedName, RegexOptions.IgnoreCase);
+        }
+
+        if (pattern.IndexOf("<name>", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return Regex.Replace(pattern, "<name>", formattedName, RegexOptions.IgnoreCase);
+        }
+
         if (pattern.Contains("{0}"))
         {
             return string.Format(pattern, formattedName);
         }
 
         return pattern.TrimEnd('/') + "/" + formattedName;
+    }
+
+    /// <summary>
+    /// Opens the wiki URL for the specified target name in the default web browser.
+    /// </summary>
+    public static void OpenWikiForName(string rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName))
+            return;
+
+        string cleanName = StripRichTextTags(rawName).Trim();
+        if (string.IsNullOrWhiteSpace(cleanName))
+            return;
+
+        string finalUrl = BuildWikiUrl(WikiUrl?.Value, cleanName);
+        try
+        {
+            Logger?.LogInfo($"Opening wiki for '{cleanName}': {finalUrl}");
+            Application.OpenURL(finalUrl);
+        }
+        catch (Exception ex)
+        {
+            Logger?.LogError($"Failed to open wiki URL '{finalUrl}': {ex}");
+        }
     }
 
     /// <summary>
@@ -154,20 +207,22 @@ public class Plugin : BaseUnityPlugin
         if (string.IsNullOrWhiteSpace(rawName))
             return;
 
-        string finalUrl = BuildWikiUrl(WikiUrl?.Value, rawName);
-        try
-        {
-            Logger?.LogInfo($"Opening wiki for '{rawName}': {finalUrl}");
-            Application.OpenURL(finalUrl);
-        }
-        catch (Exception ex)
-        {
-            Logger?.LogError($"Failed to open wiki URL '{finalUrl}': {ex}");
-        }
+        OpenWikiForName(rawName);
     }
 
     /// <summary>
-    /// Appends the Wiki option to a right-click context menu and increments the layout counter.
+    /// Opens the wiki URL for the specified NPC or mob in the default web browser.
+    /// </summary>
+    public static void OpenWikiForNpc(NPC npc)
+    {
+        if (npc == null || string.IsNullOrWhiteSpace(npc.npcName))
+            return;
+
+        OpenWikiForName(npc.npcName);
+    }
+
+    /// <summary>
+    /// Appends the Wiki option to a right-click context menu for an item and increments the layout counter.
     /// </summary>
     private static void AddWikiButton(UI_RightClickMenu menu, ItemHandler.Item item, ref int counter)
     {
@@ -178,7 +233,8 @@ public class Plugin : BaseUnityPlugin
         if (string.IsNullOrWhiteSpace(rawName))
             return;
 
-        string buttonText = !string.IsNullOrWhiteSpace(MenuText?.Value) ? MenuText.Value : "Search Wiki";
+        string template = !string.IsNullOrWhiteSpace(MenuText?.Value) ? MenuText.Value : "Search Wiki";
+        string buttonText = template.Contains("{0}") ? string.Format(template, rawName) : template;
         Vector2 pos = new Vector2(5f, -5f - counter * 25f);
 
         LUI_Button btn = menu.AddButton(
@@ -187,6 +243,56 @@ public class Plugin : BaseUnityPlugin
             _ =>
             {
                 OpenWikiForItem(item);
+                try
+                {
+                    menu.Deactivate();
+                }
+                catch (Exception ex)
+                {
+                    Logger?.LogError($"Failed to deactivate right-click menu: {ex}");
+                }
+            },
+            null);
+
+        if (btn != null && btn.text != null && btn.text.text != null)
+        {
+            btn.text.text.supportRichText = true;
+        }
+
+        counter++;
+    }
+
+    /// <summary>
+    /// Appends the Wiki option to a right-click context menu for an NPC or mob and increments the layout counter.
+    /// </summary>
+    private static void AddWikiButtonForNpc(UI_RightClickMenu menu, NPC npc, ref int counter)
+    {
+        if (menu == null || npc == null)
+            return;
+
+        string cleanName = StripRichTextTags(npc.npcName)?.Trim();
+        if (string.IsNullOrWhiteSpace(cleanName))
+            return;
+
+        string template = !string.IsNullOrWhiteSpace(MenuText?.Value) ? MenuText.Value : "Search Wiki";
+        string buttonText;
+        if (template.Contains("{0}"))
+        {
+            buttonText = string.Format(template, cleanName);
+        }
+        else
+        {
+            buttonText = $"{template} - {cleanName}";
+        }
+
+        Vector2 pos = new Vector2(5f, -5f - counter * 25f);
+
+        LUI_Button btn = menu.AddButton(
+            buttonText,
+            pos,
+            _ =>
+            {
+                OpenWikiForNpc(npc);
                 try
                 {
                     menu.Deactivate();
@@ -273,6 +379,28 @@ public class Plugin : BaseUnityPlugin
                 return;
 
             AddWikiButton(__instance, item, ref counter);
+        }
+    }
+
+    [HarmonyPatch(typeof(UI_RightClickMenu), "NpcExtraOptions")]
+    private static class NpcExtraOptions_Patch
+    {
+        private static void Postfix(UI_RightClickMenu __instance, NPC npc, ref int counter)
+        {
+            if (__instance == null || npc == null)
+                return;
+
+            bool isMob = npc.canFight;
+            bool allowMob = EnableMobs == null || EnableMobs.Value;
+            bool allowNpc = EnableNPCs == null || EnableNPCs.Value;
+
+            if (isMob && !allowMob && !(npc.interactable && allowNpc))
+                return;
+
+            if (!isMob && !allowNpc)
+                return;
+
+            AddWikiButtonForNpc(__instance, npc, ref counter);
         }
     }
 }

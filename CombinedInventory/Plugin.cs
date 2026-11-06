@@ -24,6 +24,7 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<float> WindowHeight;
     internal static ConfigEntry<bool> SeamlessInventory;
     internal static ConfigEntry<string> HiddenBagIds;
+    internal static ConfigEntry<bool> PreventBagOpenOnPickup;
 
     private readonly Harmony _harmony = new(MyPluginInfo.PLUGIN_GUID);
 
@@ -72,6 +73,12 @@ public class Plugin : BaseUnityPlugin
             "HiddenBagIds",
             "",
             "Comma-separated list of bag item IDs or names to hide from the combined inventory.");
+
+        PreventBagOpenOnPickup = Config.Bind(
+            "General",
+            "PreventBagOpenOnPickup",
+            true,
+            "Whether to prevent storage bags from opening automatically when picking up items that go into a bag.");
 
         _harmony.PatchAll();
 
@@ -2343,6 +2350,26 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
 }
 
 // Harmony patches
+[HarmonyPatch(typeof(UI_StorageBagHandler), nameof(UI_StorageBagHandler.ShowBag))]
+public static class StorageBagHandlerShowBagPatch
+{
+    private static readonly Func<UI_StorageBagHandler, int, bool> BagOpenDelegate =
+        AccessTools.MethodDelegate<Func<UI_StorageBagHandler, int, bool>>(
+            AccessTools.Method(typeof(UI_StorageBagHandler), "BagOpen"));
+
+    public static bool Prefix(UI_StorageBagHandler __instance, int id)
+    {
+        if (Plugin.PreventBagOpenOnPickup != null && Plugin.PreventBagOpenOnPickup.Value)
+        {
+            if (__instance == null || BagOpenDelegate == null || !BagOpenDelegate(__instance, id))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 [HarmonyPatch(typeof(UI_StorageBagHandler), nameof(UI_StorageBagHandler.FindRenderedSlot), new[] { typeof(int), typeof(int) })]
 public static class StorageBagHandlerFindRenderedSlotPatch
 {
