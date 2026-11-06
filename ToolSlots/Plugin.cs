@@ -531,10 +531,36 @@ namespace ToolSlots
             }
         }
 
+        public class VirtualToolItemSlot : UI_Inventory.ItemSlot
+        {
+            public ItemHandler.ItemType ToolSlotType { get; set; }
+        }
+
+        public static bool IsVirtualToolSlot(UI_Inventory.ItemSlot slot)
+        {
+            if (slot == null)
+                return false;
+
+            if (slot is VirtualToolItemSlot)
+                return true;
+
+            if (slot.IsStorageBagSlot)
+                return false;
+
+            foreach (ItemHandler.ItemType slotType in CustomToolSlotTypes)
+            {
+                if (slot.slotId == -100 - (int)slotType)
+                    return true;
+            }
+
+            return false;
+        }
+
         public static UI_Inventory.ItemSlot CreateVirtualToolItemSlot(ItemHandler.ItemType slotType, int itemId)
         {
-            return new UI_Inventory.ItemSlot
+            return new VirtualToolItemSlot
             {
+                ToolSlotType = slotType,
                 slotId = -100 - (int)slotType,
                 itemId = itemId,
                 itemAmount = 1
@@ -1414,8 +1440,8 @@ namespace ToolSlots
         {
             private static bool Prefix(UI_Inventory.ItemSlot slot)
             {
-                // Virtual tool slots have negative slotId and do not correspond to an inventory grid cell.
-                return slot != null && slot.slotId >= 0;
+                // Virtual tool slots do not correspond to an inventory or storage bag cell.
+                return !IsVirtualToolSlot(slot);
             }
         }
 
@@ -1428,7 +1454,15 @@ namespace ToolSlots
                     return true;
 
                 UI_Inventory.ItemSlot currentSlot = CurrentConsumableItemRef(__instance);
-                return currentSlot == null || currentSlot.slotId >= 0;
+                if (IsVirtualToolSlot(currentSlot))
+                {
+                    // Equipped tools activated as abilities should not be consumed,
+                    // but clear currentConsumableItem reference so it does not linger.
+                    CurrentConsumableItemRef(__instance) = null;
+                    return false;
+                }
+
+                return true;
             }
         }
 

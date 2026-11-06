@@ -1275,6 +1275,19 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
         return null;
     }
 
+    public UI_StorageBag.ItemSlot FindBagSlotByItemId(int itemId)
+    {
+        for (int i = 0; i < renderedBagSlots.Count; i++)
+        {
+            var s = renderedBagSlots[i];
+            if (s != null && s.itemId == itemId && s.itemAmount > 0)
+            {
+                return s;
+            }
+        }
+        return null;
+    }
+
     public void RefreshAllSlots()
     {
         for (int i = 0; i < allSlotViews.Count; i++)
@@ -2378,6 +2391,18 @@ public static class StorageBagHandlerFindRenderedSlotPatch
         if (__result == null && UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
         {
             __result = UI_CombinedInventoryWindow.instance.FindBagSlot(bagId, storageSlotIndex);
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_StorageBagHandler), nameof(UI_StorageBagHandler.FindRenderedSlotByItemId), new[] { typeof(int) })]
+public static class StorageBagHandlerFindRenderedSlotByItemIdPatch
+{
+    public static void Postfix(int itemId, ref UI_Inventory.ItemSlot __result)
+    {
+        if (__result == null && UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+        {
+            __result = UI_CombinedInventoryWindow.instance.FindBagSlotByItemId(itemId);
         }
     }
 }
