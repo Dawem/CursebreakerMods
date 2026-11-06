@@ -2630,7 +2630,7 @@ public static class InventoryRefreshShopSellIconStatesPatch
     }
 }
 
-[HarmonyPatch(typeof(UI_Crafting), "CraftItem")]
+[HarmonyPatch(typeof(UI_Crafting), "Craft", [typeof(object[])])]
 public static class CraftingCraftItemPatch
 {
     public static void Prefix(out int __state)
