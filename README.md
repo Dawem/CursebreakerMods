@@ -6,7 +6,7 @@ A collection of quality-of-life BepInEx mods for **The Black Grimoire: Cursebrea
 
 ## Included Mods
 
-- **CombinedInventory**: Provides a unified inventory window to view and manage items across bags and storage, with options for seamless grid display, hiding bags, and preventing bag windows from auto-opening on pickup.
+- **CombinedInventory**: Provides a unified inventory window to view and manage items across bags and storage, with options for seamless grid display, hiding bags, preventing bag windows from auto-opening on pickup, and configurable toggles to prevent the standard inventory tab from auto-opening at the bank, shops, crafting stations/workbenches, during active crafting, and when using the mount saddlebag shortcut key while the combined inventory is open. Also follows shop sell rules by dimming un-sellable items and disabling the sell button when interacting with merchants.
 - **GodMode**: God mode suite featuring invincibility, infinite health/mana/special power, no ability cooldowns, configurable damage multiplier / one-hit kill, movement speed multiplier, debug mode toggle, hotkey toggle (default `F10`), and in-game ModConfigMenu support.
 - **HighlightToggle**: Adds a hotkey (default `H`) to toggle persistent highlighting for interactables, loot, resources, and NPCs.
 - **ModConfigMenu**: Adds a native "Mods" tab to the in-game Settings/Options window, allowing players to view and configure options for all installed BepInEx mods with live editing, hotkey binding, search filtering, and preset resets.

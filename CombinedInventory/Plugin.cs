@@ -25,6 +25,11 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> SeamlessInventory;
     internal static ConfigEntry<string> HiddenBagIds;
     internal static ConfigEntry<bool> PreventBagOpenOnPickup;
+    internal static ConfigEntry<bool> PreventInventoryOpenOnBank;
+    internal static ConfigEntry<bool> PreventInventoryOpenOnShop;
+    internal static ConfigEntry<bool> PreventInventoryOpenOnCrafting;
+    internal static ConfigEntry<bool> PreventInventoryOpenOnWorkbench;
+    internal static ConfigEntry<bool> PreventInventoryOpenOnHorsy;
 
     private readonly Harmony _harmony = new(MyPluginInfo.PLUGIN_GUID);
 
@@ -79,6 +84,36 @@ public class Plugin : BaseUnityPlugin
             "PreventBagOpenOnPickup",
             true,
             "Whether to prevent storage bags from opening automatically when picking up items that go into a bag.");
+
+        PreventInventoryOpenOnBank = Config.Bind(
+            "General",
+            "PreventInventoryOpenOnBank",
+            true,
+            "Whether to prevent the standard inventory tab from opening when opening the bank if the combined inventory is already open.");
+
+        PreventInventoryOpenOnShop = Config.Bind(
+            "General",
+            "PreventInventoryOpenOnShop",
+            true,
+            "Whether to prevent the standard inventory tab from opening when opening a shop if the combined inventory is already open.");
+
+        PreventInventoryOpenOnCrafting = Config.Bind(
+            "General",
+            "PreventInventoryOpenOnCrafting",
+            true,
+            "Whether to prevent the standard inventory tab from opening during active item crafting if the combined inventory is already open.");
+
+        PreventInventoryOpenOnWorkbench = Config.Bind(
+            "General",
+            "PreventInventoryOpenOnWorkbench",
+            true,
+            "Whether to prevent the standard inventory tab from opening when opening a craft station or workbench if the combined inventory is already open.");
+
+        PreventInventoryOpenOnHorsy = Config.Bind(
+            "General",
+            "PreventInventoryOpenOnHorsy",
+            true,
+            "Whether to prevent the standard inventory tab from opening when using the mount saddlebag shortcut key if the combined inventory is already open.");
 
         _harmony.PatchAll();
 
@@ -486,6 +521,52 @@ public class CombinedSlotView
                     && UI_Inventory.instance.usingItemSlot == bagItemSlot;
                 usingOverlay.SetActive(isUsing);
             }
+        }
+
+        UpdateShopSellVisualState();
+    }
+
+    public void UpdateShopSellVisualState()
+    {
+        if (iconImage == null) return;
+
+        int itemId = 0;
+        if (!isBagSlot)
+        {
+            var realSlot = UI_Inventory.instance?.GetSlotByIndex(mainSlotId);
+            itemId = realSlot != null ? realSlot.itemId : 0;
+        }
+        else if (bagItemSlot != null)
+        {
+            itemId = bagItemSlot.itemId;
+        }
+
+        if (itemId <= 0)
+        {
+            iconImage.SetImageAlpha(1f);
+            if (frameImage != null)
+            {
+                frameImage.SetImageAlpha(1f);
+            }
+            return;
+        }
+
+        bool shouldDim = UI_Inventory.ShouldDimItemForActiveShop(itemId);
+        float num = (itemId > 1000000) ? 0.78f : 1f;
+        if (shouldDim)
+        {
+            num = Mathf.Min(num, 0.25f);
+        }
+        iconImage.SetImageAlpha(num);
+
+        if (frameImage != null)
+        {
+            frameImage.SetImageAlpha(shouldDim ? 0.25f : 1f);
+        }
+
+        if (isBagSlot && bagItemSlot != null && bagItemSlot.image_banknote != null)
+        {
+            bagItemSlot.image_banknote.SetImageAlpha(shouldDim ? 0.25f : 1f);
         }
     }
 }
@@ -1320,6 +1401,14 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
                     view.Refresh();
                 }
             }
+        }
+    }
+
+    public void RefreshShopSellVisualStates()
+    {
+        for (int i = 0; i < allSlotViews.Count; i++)
+        {
+            allSlotViews[i]?.UpdateShopSellVisualState();
         }
     }
 
@@ -2468,5 +2557,169 @@ public static class BottomRightTabsButtonTabPatch
     {
         UI_CombinedInventoryWindow.BringBottomRightTabsToFront();
         UI_CombinedInventoryWindow.EnsureBehindBottomRightTabs();
+    }
+}
+
+[HarmonyPatch(typeof(UI_Bank), nameof(UI_Bank.Activate))]
+public static class BankActivatePatch
+{
+    public static void Prefix(out int __state)
+    {
+        __state = -1;
+        if (Plugin.PreventInventoryOpenOnBank != null && Plugin.PreventInventoryOpenOnBank.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            {
+                if (UI_BottomRightTabs.instance != null)
+                {
+                    __state = UI_BottomRightTabs.instance.currentTab;
+                    // Pretend currentTab is 1 so UI_Bank.Activate() skips calling Button_Tab(1)
+                    UI_BottomRightTabs.instance.currentTab = 1;
+                }
+            }
+        }
+    }
+
+    public static void Finalizer(int __state)
+    {
+        if (__state != -1 && UI_BottomRightTabs.instance != null)
+        {
+            UI_BottomRightTabs.instance.currentTab = __state;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_Shop), nameof(UI_Shop.OnActivate))]
+public static class ShopOnActivatePatch
+{
+    public static void Prefix(out int __state)
+    {
+        __state = -1;
+        if (Plugin.PreventInventoryOpenOnShop != null && Plugin.PreventInventoryOpenOnShop.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            {
+                if (UI_BottomRightTabs.instance != null)
+                {
+                    __state = UI_BottomRightTabs.instance.currentTab;
+                    // Pretend currentTab is 1 so UI_Shop.OnActivate() skips calling Button_Tab(1)
+                    UI_BottomRightTabs.instance.currentTab = 1;
+                }
+            }
+        }
+    }
+
+    public static void Finalizer(int __state)
+    {
+        if (__state != -1 && UI_BottomRightTabs.instance != null)
+        {
+            UI_BottomRightTabs.instance.currentTab = __state;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_Inventory), nameof(UI_Inventory.RefreshShopSellIconStates))]
+public static class InventoryRefreshShopSellIconStatesPatch
+{
+    public static void Postfix()
+    {
+        if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+        {
+            UI_CombinedInventoryWindow.instance.RefreshShopSellVisualStates();
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_Crafting), "CraftItem")]
+public static class CraftingCraftItemPatch
+{
+    public static void Prefix(out int __state)
+    {
+        __state = -1;
+        if (Plugin.PreventInventoryOpenOnCrafting != null && Plugin.PreventInventoryOpenOnCrafting.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            {
+                if (UI_BottomRightTabs.instance != null && UI_BottomRightTabs.instance.currentTab == 0)
+                {
+                    __state = 0;
+                    // Pretend currentTab is not 0 so UI_Crafting.CraftItem skips calling Button_Tab(1)
+                    UI_BottomRightTabs.instance.currentTab = -1;
+                }
+            }
+        }
+    }
+
+    public static void Finalizer(int __state)
+    {
+        if (__state != -1 && UI_BottomRightTabs.instance != null)
+        {
+            UI_BottomRightTabs.instance.currentTab = __state;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_Crafting), nameof(UI_Crafting.Open), new[] { typeof(int), typeof(Interactable_Workbench) })]
+public static class CraftingOpenPatch
+{
+    public static void Prefix(out UI_BottomRightTabs __state)
+    {
+        __state = null;
+        if (Plugin.PreventInventoryOpenOnWorkbench != null && Plugin.PreventInventoryOpenOnWorkbench.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            {
+                __state = UI_BottomRightTabs.instance;
+                // Temporarily null instance so UI_Crafting.Open skips calling UI_BottomRightTabs.instance.OpenTab(1)
+                UI_BottomRightTabs.instance = null;
+            }
+        }
+    }
+
+    public static void Finalizer(UI_BottomRightTabs __state)
+    {
+        if (__state != null)
+        {
+            UI_BottomRightTabs.instance = __state;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(KeyboardInputs), nameof(KeyboardInputs.GetKeyDown), new[] { typeof(string) })]
+public static class KeyboardInputsGetKeyDownPatch
+{
+    public static bool Prefix(KeyboardInputs __instance, string key, ref bool __result)
+    {
+        if (key == KeyboardInputs.OpenHorsyBag)
+        {
+            if (Plugin.PreventInventoryOpenOnHorsy != null && Plugin.PreventInventoryOpenOnHorsy.Value)
+            {
+                if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+                {
+                    if (!__instance.changingInputs && Input.GetKeyDown(__instance.FindInputKey(key).keyCode))
+                    {
+                        if (QuestHandler.instance != null && QuestHandler.instance.getQuestPhase(102) == 999)
+                        {
+                            if (Player.instance != null && Player.instance.followers != null && Player.instance.followers.followerId == 1080)
+                            {
+                                UI_StorageBagHandler.instance?.OpenBag(9055);
+                            }
+                            else
+                            {
+                                UI_Chatbox.instance?.AddChatMessage("Horsy must be with you to do that.", UI_Chatbox.MessageType.gameplay);
+                            }
+                        }
+                        else
+                        {
+                            UI_Chatbox.instance?.AddChatMessage("You must complete the quest 'Stable Foods' before you can do that.", UI_Chatbox.MessageType.gameplay);
+                        }
+
+                        __result = false;
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     }
 }
