@@ -24,6 +24,7 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<float> WindowHeight;
     internal static ConfigEntry<bool> SeamlessInventory;
     internal static ConfigEntry<string> HiddenBagIds;
+    internal static ConfigEntry<bool> ReplaceDefaultInventory;
     internal static ConfigEntry<bool> PreventBagOpenOnPickup;
     internal static ConfigEntry<bool> PreventInventoryOpenOnBank;
     internal static ConfigEntry<bool> PreventInventoryOpenOnShop;
@@ -78,6 +79,22 @@ public class Plugin : BaseUnityPlugin
             "HiddenBagIds",
             "",
             "Comma-separated list of bag item IDs or names to hide from the combined inventory.");
+
+        ReplaceDefaultInventory = Config.Bind(
+            "General",
+            "ReplaceDefaultInventory",
+            false,
+            "Whether to completely replace the default inventory tab and shortcuts with the Combined Inventory window.");
+
+        ReplaceDefaultInventory.SettingChanged += (_, _) =>
+        {
+            if (ReplaceDefaultInventory.Value && UI_BottomRightTabs.instance != null && UI_BottomRightTabs.instance.currentTab == UI_BottomRightTabs.Inventory)
+            {
+                UI_BottomRightTabs.instance.CloseAllTabs();
+                UI_CombinedInventoryWindow.OpenWindow();
+            }
+            UI_CombinedInventoryWindow.SyncBottomRightTabHighlight();
+        };
 
         PreventBagOpenOnPickup = Config.Bind(
             "General",
@@ -643,12 +660,20 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
         public int originalIndex;
     }
 
+    private static int lastToggleFrame = -1;
+
     public static void Toggle()
     {
         if (Player.instance == null || UI_Inventory.instance == null || UnityEngine.SceneManagement.SceneManager.GetActiveScene().name == "MainMenu")
         {
             return;
         }
+
+        if (lastToggleFrame == Time.frameCount)
+        {
+            return;
+        }
+        lastToggleFrame = Time.frameCount;
 
         EnsureInstance();
         if (instance != null)
@@ -663,6 +688,7 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
                 instance.Open();
                 instance.BringToFront();
             }
+            SyncBottomRightTabHighlight();
         }
     }
 
@@ -677,8 +703,30 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
         if (instance != null)
         {
             instance.DrawItems();
-            instance.Open();
+            if (!instance.IsOpen())
+            {
+                instance.Open();
+            }
             instance.BringToFront();
+            SyncBottomRightTabHighlight();
+        }
+    }
+
+    public static void SyncBottomRightTabHighlight()
+    {
+        if (UI_BottomRightTabs.instance?.selectedImages == null) return;
+        if (!UI_BottomRightTabs.instance.selectedImages.TryGetValue(UI_BottomRightTabs.Inventory, out var selectedImg) || selectedImg == null)
+            return;
+
+        if (Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+        {
+            bool isOpen = instance != null && instance.IsOpen();
+            selectedImg.SetActive(isOpen);
+        }
+        else
+        {
+            bool isVanillaInvOpen = UI_BottomRightTabs.instance.currentTab == UI_BottomRightTabs.Inventory;
+            selectedImg.SetActive(isVanillaInvOpen);
         }
     }
 
@@ -2136,12 +2184,19 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
         return true;
     }
 
+    public override void OnActivate()
+    {
+        base.OnActivate();
+        SyncBottomRightTabHighlight();
+    }
+
     public override void OnDeactivate()
     {
         base.OnDeactivate();
         CloseBagsMenu();
         DestroyActiveDragGhost();
         UI_ItemTooltips.instance?.Deactivate();
+        SyncBottomRightTabHighlight();
     }
 
     private void DestroyActiveDragGhost()
@@ -2169,9 +2224,7 @@ public class UI_CombinedInventoryWindow : LUI_DragWindow
 
         if (UI_ItemTooltips.instance != null)
         {
-            UI_ItemTooltips.instance.customMode = slot.IsStorageBagSlot
-                ? UI_ItemTooltips.TooltipMode.storageBag
-                : UI_ItemTooltips.TooltipMode.inventory;
+            UI_ItemTooltips.instance.customMode = UI_ItemTooltips.TooltipMode.inventory;
             UI_ItemTooltips.instance.ItemTooltip(slot.itemId, icon, slot);
         }
     }
@@ -2550,11 +2603,191 @@ public static class InventorySetupUIPatch
     }
 }
 
+[HarmonyPatch(typeof(UI_ItemTooltips))]
+public static class ItemTooltipsPositionPatch
+{
+    [HarmonyPatch(nameof(UI_ItemTooltips.ItemTooltip), new[] { typeof(int), typeof(LUI_Image), typeof(UI_Inventory.InventorySlot) })]
+    [HarmonyPostfix]
+    public static void ItemTooltip_Postfix(UI_ItemTooltips __instance)
+    {
+        RepositionTooltips(__instance);
+    }
+
+    [HarmonyPatch("Update")]
+    [HarmonyPostfix]
+    public static void Update_Postfix(UI_ItemTooltips __instance)
+    {
+        RepositionTooltips(__instance);
+    }
+
+    private static void RepositionTooltips(UI_ItemTooltips __instance)
+    {
+        if (__instance == null || !__instance.active || __instance.toolTips == null || __instance.toolTips.Count == 0)
+            return;
+
+        var targetImg = __instance.hoveringTargetImage;
+        if (targetImg == null || targetImg.spawnedObject == null)
+            return;
+
+        bool isCombinedInventory = UI_CombinedInventoryWindow.instance != null &&
+                                   UI_CombinedInventoryWindow.instance.gameObject != null &&
+                                   targetImg.spawnedObject.transform.IsChildOf(UI_CombinedInventoryWindow.instance.gameObject.transform);
+
+        bool isMultiColumnTargetMode = __instance.toolTips.Count > 1 &&
+                                       __instance.customMode != UI_ItemTooltips.TooltipMode.inventory &&
+                                       __instance.customMode != UI_ItemTooltips.TooltipMode.actionBar &&
+                                       !(ControllerInputMode.MouseHoverSuppressed() && __instance.controllerAnchorWindow != null);
+
+        if (!isCombinedInventory && !isMultiColumnTargetMode)
+            return;
+
+        var firstBg = __instance.toolTips[0]?.image_bg;
+        if (firstBg == null || firstBg.rectTransform == null)
+            return;
+
+        Vector2 canvasSize = CBUI.instance != null
+            ? CBUI.instance.GetCanvasSize()
+            : new Vector2(Screen.width, Screen.height);
+
+        firstBg.SetAnchor(Position.topLeft);
+        firstBg.SetPivot(Position.topLeft);
+        firstBg.SetAbsolutePosition(targetImg.GetAbsolutePosition());
+        Vector2 targetTopLeft = firstBg.GetPosition();
+        Vector2 targetSize = targetImg.GetSize();
+
+        const float gap = 4f;
+        const float slotOffset = 8f;
+
+        int count = __instance.toolTips.Count;
+        float totalWidth = 0f;
+        float commonY = Mathf.Min(0f, targetTopLeft.y);
+
+        for (int i = 0; i < count; i++)
+        {
+            var bg = __instance.toolTips[i]?.image_bg;
+            if (bg == null) return;
+            Vector2 sz = bg.GetSize();
+            totalWidth += sz.x;
+            if (i > 0) totalWidth += gap;
+
+            float minY = -canvasSize.y + sz.y;
+            if (commonY < minY)
+            {
+                commonY = minY;
+            }
+        }
+        commonY = Mathf.Min(0f, commonY);
+
+        float rightStart = targetTopLeft.x + targetSize.x + slotOffset;
+        float leftStart = targetTopLeft.x - slotOffset;
+
+        bool fitsRight = rightStart + totalWidth <= canvasSize.x;
+        bool fitsLeft = leftStart - totalWidth >= 0f;
+
+        if (fitsRight)
+        {
+            float curX = rightStart;
+            for (int i = 0; i < count; i++)
+            {
+                var tt = __instance.toolTips[i];
+                var bg = tt.image_bg;
+                bg.SetAnchor(Position.topLeft);
+                bg.SetPivot(Position.topLeft);
+                bg.SetPosition(curX, commonY);
+                tt.container?.BringToFront();
+                curX += bg.GetSize().x + gap;
+            }
+        }
+        else if (fitsLeft)
+        {
+            float curRight = leftStart;
+            for (int i = 0; i < count; i++)
+            {
+                var tt = __instance.toolTips[i];
+                var bg = tt.image_bg;
+                float w = bg.GetSize().x;
+                bg.SetAnchor(Position.topLeft);
+                bg.SetPivot(Position.topLeft);
+                bg.SetPosition(curRight - w, commonY);
+                tt.container?.BringToFront();
+                curRight -= w + gap;
+            }
+        }
+        else if (leftStart >= canvasSize.x - rightStart)
+        {
+            float curRight = Mathf.Clamp(leftStart, totalWidth, canvasSize.x);
+            for (int i = 0; i < count; i++)
+            {
+                var tt = __instance.toolTips[i];
+                var bg = tt.image_bg;
+                float w = bg.GetSize().x;
+                bg.SetAnchor(Position.topLeft);
+                bg.SetPivot(Position.topLeft);
+                bg.SetPosition(curRight - w, commonY);
+                tt.container?.BringToFront();
+                curRight -= w + gap;
+            }
+        }
+        else
+        {
+            float curX = Mathf.Clamp(rightStart, 0f, Mathf.Max(0f, canvasSize.x - totalWidth));
+            for (int i = 0; i < count; i++)
+            {
+                var tt = __instance.toolTips[i];
+                var bg = tt.image_bg;
+                bg.SetAnchor(Position.topLeft);
+                bg.SetPivot(Position.topLeft);
+                bg.SetPosition(curX, commonY);
+                tt.container?.BringToFront();
+                curX += bg.GetSize().x + gap;
+            }
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_BottomRightTabs), nameof(UI_BottomRightTabs.OpenTab))]
+public static class BottomRightTabsOpenTabPatch
+{
+    public static bool Prefix(int tab)
+    {
+        if (tab == UI_BottomRightTabs.Inventory && Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+        {
+            if (UI_BottomRightTabs.instance != null && UI_BottomRightTabs.instance.currentTab == UI_BottomRightTabs.Inventory)
+            {
+                UI_BottomRightTabs.instance.CloseAllTabs();
+            }
+            UI_CombinedInventoryWindow.OpenWindow();
+            UI_CombinedInventoryWindow.SyncBottomRightTabHighlight();
+            return false;
+        }
+        return true;
+    }
+}
+
 [HarmonyPatch(typeof(UI_BottomRightTabs), nameof(UI_BottomRightTabs.Button_Tab))]
 public static class BottomRightTabsButtonTabPatch
 {
+    public static bool Prefix(object[] vars)
+    {
+        if (vars != null && vars.Length > 0 && vars[0] is int tabId && tabId == UI_BottomRightTabs.Inventory)
+        {
+            if (Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+            {
+                if (UI_BottomRightTabs.instance != null && UI_BottomRightTabs.instance.currentTab == UI_BottomRightTabs.Inventory)
+                {
+                    UI_BottomRightTabs.instance.CloseAllTabs();
+                }
+                UI_CombinedInventoryWindow.Toggle();
+                UI_CombinedInventoryWindow.SyncBottomRightTabHighlight();
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static void Postfix()
     {
+        UI_CombinedInventoryWindow.SyncBottomRightTabHighlight();
         UI_CombinedInventoryWindow.BringBottomRightTabsToFront();
         UI_CombinedInventoryWindow.EnsureBehindBottomRightTabs();
     }
@@ -2566,16 +2799,28 @@ public static class BankActivatePatch
     public static void Prefix(out int __state)
     {
         __state = -1;
-        if (Plugin.PreventInventoryOpenOnBank != null && Plugin.PreventInventoryOpenOnBank.Value)
+        bool replaceDefault = Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value;
+        bool preventWhenOpen = Plugin.PreventInventoryOpenOnBank != null && Plugin.PreventInventoryOpenOnBank.Value &&
+                               UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen();
+
+        if (replaceDefault || preventWhenOpen)
         {
-            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            if (UI_BottomRightTabs.instance != null)
             {
-                if (UI_BottomRightTabs.instance != null)
-                {
-                    __state = UI_BottomRightTabs.instance.currentTab;
-                    // Pretend currentTab is 1 so UI_Bank.Activate() skips calling Button_Tab(1)
-                    UI_BottomRightTabs.instance.currentTab = 1;
-                }
+                __state = UI_BottomRightTabs.instance.currentTab;
+                // Pretend currentTab is 1 so UI_Bank.Activate() skips calling Button_Tab(1)
+                UI_BottomRightTabs.instance.currentTab = 1;
+            }
+        }
+    }
+
+    public static void Postfix()
+    {
+        if (Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance == null || !UI_CombinedInventoryWindow.instance.IsOpen())
+            {
+                UI_CombinedInventoryWindow.OpenWindow();
             }
         }
     }
@@ -2592,20 +2837,41 @@ public static class BankActivatePatch
 [HarmonyPatch(typeof(UI_Shop), nameof(UI_Shop.OnActivate))]
 public static class ShopOnActivatePatch
 {
+    internal static bool AutoOpenedByShop;
+
     public static void Prefix(out int __state)
     {
         __state = -1;
-        if (Plugin.PreventInventoryOpenOnShop != null && Plugin.PreventInventoryOpenOnShop.Value)
+        bool replaceDefault = Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value;
+        bool isCombinedOpen = UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen();
+        bool preventWhenOpen = Plugin.PreventInventoryOpenOnShop != null && Plugin.PreventInventoryOpenOnShop.Value && isCombinedOpen;
+
+        if (replaceDefault)
         {
-            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            AutoOpenedByShop = !isCombinedOpen;
+        }
+        else
+        {
+            AutoOpenedByShop = false;
+        }
+
+        if (replaceDefault || preventWhenOpen)
+        {
+            if (UI_BottomRightTabs.instance != null)
             {
-                if (UI_BottomRightTabs.instance != null)
-                {
-                    __state = UI_BottomRightTabs.instance.currentTab;
-                    // Pretend currentTab is 1 so UI_Shop.OnActivate() skips calling Button_Tab(1)
-                    UI_BottomRightTabs.instance.currentTab = 1;
-                }
+                __state = UI_BottomRightTabs.instance.currentTab;
+                // Pretend currentTab is 1 so UI_Shop.OnActivate() skips calling Button_Tab(1)
+                UI_BottomRightTabs.instance.currentTab = 1;
             }
+        }
+    }
+
+    public static void Postfix()
+    {
+        if (AutoOpenedByShop && Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+        {
+            UI_CombinedInventoryWindow.OpenWindow();
+            UI_CombinedInventoryWindow.instance?.RefreshShopSellVisualStates();
         }
     }
 
@@ -2614,6 +2880,25 @@ public static class ShopOnActivatePatch
         if (__state != -1 && UI_BottomRightTabs.instance != null)
         {
             UI_BottomRightTabs.instance.currentTab = __state;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(UI_Shop), nameof(UI_Shop.OnDeactivate))]
+public static class ShopOnDeactivatePatch
+{
+    public static void Postfix()
+    {
+        if (ShopOnActivatePatch.AutoOpenedByShop)
+        {
+            ShopOnActivatePatch.AutoOpenedByShop = false;
+            if (Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+            {
+                if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+                {
+                    UI_CombinedInventoryWindow.instance.Close(null);
+                }
+            }
         }
     }
 }
@@ -2636,15 +2921,30 @@ public static class CraftingCraftItemPatch
     public static void Prefix(out int __state)
     {
         __state = -1;
-        if (Plugin.PreventInventoryOpenOnCrafting != null && Plugin.PreventInventoryOpenOnCrafting.Value)
+        bool replaceDefault = Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value;
+        bool preventWhenOpen = Plugin.PreventInventoryOpenOnCrafting != null && Plugin.PreventInventoryOpenOnCrafting.Value &&
+                               UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen();
+
+        if (replaceDefault || preventWhenOpen)
         {
-            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            if (UI_BottomRightTabs.instance != null && UI_BottomRightTabs.instance.currentTab == 0)
             {
-                if (UI_BottomRightTabs.instance != null && UI_BottomRightTabs.instance.currentTab == 0)
+                __state = 0;
+                // Pretend currentTab is not 0 so UI_Crafting.CraftItem skips calling Button_Tab(1)
+                UI_BottomRightTabs.instance.currentTab = -1;
+            }
+        }
+    }
+
+    public static void Postfix()
+    {
+        if (Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance == null || !UI_CombinedInventoryWindow.instance.IsOpen())
+            {
+                if (Plugin.PreventInventoryOpenOnCrafting == null || !Plugin.PreventInventoryOpenOnCrafting.Value)
                 {
-                    __state = 0;
-                    // Pretend currentTab is not 0 so UI_Crafting.CraftItem skips calling Button_Tab(1)
-                    UI_BottomRightTabs.instance.currentTab = -1;
+                    UI_CombinedInventoryWindow.OpenWindow();
                 }
             }
         }
@@ -2665,13 +2965,25 @@ public static class CraftingOpenPatch
     public static void Prefix(out UI_BottomRightTabs __state)
     {
         __state = null;
-        if (Plugin.PreventInventoryOpenOnWorkbench != null && Plugin.PreventInventoryOpenOnWorkbench.Value)
+        bool replaceDefault = Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value;
+        bool preventWhenOpen = Plugin.PreventInventoryOpenOnWorkbench != null && Plugin.PreventInventoryOpenOnWorkbench.Value &&
+                               UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen();
+
+        if (replaceDefault || preventWhenOpen)
         {
-            if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+            __state = UI_BottomRightTabs.instance;
+            // Temporarily null instance so UI_Crafting.Open skips calling UI_BottomRightTabs.instance.OpenTab(1)
+            UI_BottomRightTabs.instance = null;
+        }
+    }
+
+    public static void Postfix()
+    {
+        if (Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value)
+        {
+            if (UI_CombinedInventoryWindow.instance == null || !UI_CombinedInventoryWindow.instance.IsOpen())
             {
-                __state = UI_BottomRightTabs.instance;
-                // Temporarily null instance so UI_Crafting.Open skips calling UI_BottomRightTabs.instance.OpenTab(1)
-                UI_BottomRightTabs.instance = null;
+                UI_CombinedInventoryWindow.OpenWindow();
             }
         }
     }
@@ -2688,35 +3000,59 @@ public static class CraftingOpenPatch
 [HarmonyPatch(typeof(KeyboardInputs), nameof(KeyboardInputs.GetKeyDown), new[] { typeof(string) })]
 public static class KeyboardInputsGetKeyDownPatch
 {
+    private static readonly Action<UI_StorageBagHandler> ToggleAllBagsDelegate =
+        AccessTools.MethodDelegate<Action<UI_StorageBagHandler>>(
+            AccessTools.Method(typeof(UI_StorageBagHandler), "ToggleAllBags"));
+
     public static bool Prefix(KeyboardInputs __instance, string key, ref bool __result)
     {
+        bool replaceDefault = Plugin.ReplaceDefaultInventory != null && Plugin.ReplaceDefaultInventory.Value;
+
+        if (key == KeyboardInputs.OpenBags && replaceDefault)
+        {
+            if (!__instance.changingInputs && Input.GetKeyDown(__instance.FindInputKey(key).keyCode))
+            {
+                UI_CombinedInventoryWindow.OpenWindow();
+                if (UI_StorageBagHandler.instance != null && ToggleAllBagsDelegate != null)
+                {
+                    ToggleAllBagsDelegate(UI_StorageBagHandler.instance);
+                }
+                __result = false;
+                return false;
+            }
+        }
+
         if (key == KeyboardInputs.OpenHorsyBag)
         {
-            if (Plugin.PreventInventoryOpenOnHorsy != null && Plugin.PreventInventoryOpenOnHorsy.Value)
+            bool preventWhenOpen = Plugin.PreventInventoryOpenOnHorsy != null && Plugin.PreventInventoryOpenOnHorsy.Value &&
+                                   UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen();
+
+            if (replaceDefault || preventWhenOpen)
             {
-                if (UI_CombinedInventoryWindow.instance != null && UI_CombinedInventoryWindow.instance.IsOpen())
+                if (!__instance.changingInputs && Input.GetKeyDown(__instance.FindInputKey(key).keyCode))
                 {
-                    if (!__instance.changingInputs && Input.GetKeyDown(__instance.FindInputKey(key).keyCode))
+                    if (QuestHandler.instance != null && QuestHandler.instance.getQuestPhase(102) == 999)
                     {
-                        if (QuestHandler.instance != null && QuestHandler.instance.getQuestPhase(102) == 999)
+                        if (Player.instance != null && Player.instance.followers != null && Player.instance.followers.followerId == 1080)
                         {
-                            if (Player.instance != null && Player.instance.followers != null && Player.instance.followers.followerId == 1080)
+                            if (replaceDefault && (UI_CombinedInventoryWindow.instance == null || !UI_CombinedInventoryWindow.instance.IsOpen()))
                             {
-                                UI_StorageBagHandler.instance?.OpenBag(9055);
+                                UI_CombinedInventoryWindow.OpenWindow();
                             }
-                            else
-                            {
-                                UI_Chatbox.instance?.AddChatMessage("Horsy must be with you to do that.", UI_Chatbox.MessageType.gameplay);
-                            }
+                            UI_StorageBagHandler.instance?.OpenBag(9055);
                         }
                         else
                         {
-                            UI_Chatbox.instance?.AddChatMessage("You must complete the quest 'Stable Foods' before you can do that.", UI_Chatbox.MessageType.gameplay);
+                            UI_Chatbox.instance?.AddChatMessage("Horsy must be with you to do that.", UI_Chatbox.MessageType.gameplay);
                         }
-
-                        __result = false;
-                        return false;
                     }
+                    else
+                    {
+                        UI_Chatbox.instance?.AddChatMessage("You must complete the quest 'Stable Foods' before you can do that.", UI_Chatbox.MessageType.gameplay);
+                    }
+
+                    __result = false;
+                    return false;
                 }
             }
         }
