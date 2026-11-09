@@ -130,6 +130,8 @@ namespace ToolSlots
             SalvagingHandlerType != null ? AccessTools.Method(SalvagingHandlerType, "CanSalvage", new[] { typeof(ItemHandler.Item) }) : null;
         private static readonly System.Reflection.MethodInfo IsSalvageLockedMethod =
             SalvagingHandlerType != null ? AccessTools.Method(SalvagingHandlerType, "IsSalvageLocked", new[] { typeof(int) }) : null;
+        private static readonly System.Reflection.MethodInfo MemberwiseCloneMethod =
+            AccessTools.Method(typeof(object), "MemberwiseClone");
 
         public static bool CanSalvageItemUnlocked(ItemHandler.Item item)
         {
@@ -150,6 +152,8 @@ namespace ToolSlots
 
         private static readonly Stack<List<HarvestablesHandler.Tool>> ActiveResourceToolStack = new Stack<List<HarvestablesHandler.Tool>>();
         private static readonly Stack<ItemHandler.ItemType> ActiveForcedToolSlotStack = new Stack<ItemHandler.ItemType>();
+        private static readonly Dictionary<ItemHandler.ItemType, List<StatsHandler.Stat>> AppliedToolSlotSkillStats =
+            new Dictionary<ItemHandler.ItemType, List<StatsHandler.Stat>>();
         private static int _suppressInventoryToolCheckDepth;
         private static bool _suppressWeaponRedirect;
         private static bool _suppressToolSlotRedirect;
@@ -631,6 +635,228 @@ namespace ToolSlots
             return false;
         }
 
+        public static int GetToolEffectiveLevel(ItemHandler.Item item)
+        {
+            if (item == null)
+                return -1;
+            if (item.typeId == 872 || GetBaseItemId(item.typeId) == 872)
+                return 100;
+            return item.level;
+        }
+
+        public static bool IsSkillApplicableToToolSlot(ItemHandler.ItemType slotType, SkillsHandler.SkillType skill)
+        {
+            switch (slotType)
+            {
+                case ToolSlotAxe:
+                    return skill == SkillsHandler.SkillType.woodcutting;
+                case ToolSlotPickaxe:
+                    return skill == SkillsHandler.SkillType.mining;
+                case ToolSlotFishingRod:
+                case ToolSlotFishingGear:
+                    return skill == SkillsHandler.SkillType.fishing;
+                case ToolSlotHammer:
+                    return skill == SkillsHandler.SkillType.blacksmithy;
+                case ToolSlotShears:
+                case ToolSlotNeedle:
+                    return skill == SkillsHandler.SkillType.tailoring;
+                case ToolSlotSaw:
+                    return skill == SkillsHandler.SkillType.carpentry;
+                case ToolSlotChisel:
+                    return skill == SkillsHandler.SkillType.carpentry || skill == SkillsHandler.SkillType.mining;
+                case ToolSlotKnife:
+                    return skill == SkillsHandler.SkillType.cooking || skill == SkillsHandler.SkillType.fishing;
+                case ToolSlotPestle:
+                    return skill == SkillsHandler.SkillType.alchemy;
+                default:
+                    return false;
+            }
+        }
+
+        public static bool IsStatApplicableToToolSlot(ItemHandler.ItemType slotType, StatsHandler.StatType statType)
+        {
+            switch (statType)
+            {
+                case StatsHandler.StatType.harvestingSpeedWoodcutting:
+                    return slotType == ToolSlotAxe;
+                default:
+                    string name = statType.ToString().ToLowerInvariant();
+                    if (name.Contains("harvestingspeed") || name.Contains("harvestspeed") || name.Contains("skillspeed"))
+                    {
+                        if (name.Contains("wood") || name.Contains("axe"))
+                            return slotType == ToolSlotAxe;
+                        if (name.Contains("mine") || name.Contains("mining") || name.Contains("pickaxe"))
+                            return slotType == ToolSlotPickaxe;
+                        if (name.Contains("fish"))
+                            return slotType == ToolSlotFishingRod || slotType == ToolSlotFishingGear;
+                    }
+                    return false;
+            }
+        }
+
+        public static List<StatsHandler.Stat> GetApplicableToolSkillStats(ItemHandler.ItemType slotType, ItemHandler.Item item)
+        {
+            List<StatsHandler.Stat> list = new List<StatsHandler.Stat>();
+            if (item == null || item.stats == null || item.stats.Count == 0)
+                return list;
+
+            for (int i = 0; i < item.stats.Count; i++)
+            {
+                StatsHandler.Stat s = item.stats[i];
+                if (s != null && IsStatApplicableToToolSlot(slotType, s.type))
+                {
+                    list.Add(s);
+                }
+            }
+            return list;
+        }
+
+        public static void ApplyToolSlotSkillStats(PlayerEquipment equipment, ItemHandler.ItemType slotType, ItemHandler.Item item)
+        {
+            if (equipment == null || equipment.player == null || equipment.player.stats == null || item == null)
+                return;
+
+            RemoveToolSlotSkillStats(equipment, slotType, null);
+
+            List<StatsHandler.Stat> applicable = GetApplicableToolSkillStats(slotType, item);
+            if (applicable.Count > 0)
+            {
+                equipment.player.stats.AddItemStats(applicable);
+                AppliedToolSlotSkillStats[slotType] = new List<StatsHandler.Stat>(applicable);
+            }
+        }
+
+        public static void RemoveToolSlotSkillStats(PlayerEquipment equipment, ItemHandler.ItemType slotType, ItemHandler.Item item)
+        {
+            if (equipment == null || equipment.player == null || equipment.player.stats == null)
+            {
+                AppliedToolSlotSkillStats.Remove(slotType);
+                return;
+            }
+
+            if (AppliedToolSlotSkillStats.TryGetValue(slotType, out List<StatsHandler.Stat> activeStats))
+            {
+                if (activeStats != null && activeStats.Count > 0)
+                {
+                    equipment.player.stats.RemoveItemStats(activeStats);
+                }
+                AppliedToolSlotSkillStats.Remove(slotType);
+            }
+            else if (item != null)
+            {
+                List<StatsHandler.Stat> applicable = GetApplicableToolSkillStats(slotType, item);
+                if (applicable.Count > 0)
+                {
+                    equipment.player.stats.RemoveItemStats(applicable);
+                }
+            }
+        }
+
+        public static void ClearAllAppliedToolSlotSkillStats(PlayerEquipment equipment)
+        {
+            if (equipment != null && equipment.player != null && equipment.player.stats != null)
+            {
+                foreach (KeyValuePair<ItemHandler.ItemType, List<StatsHandler.Stat>> kvp in AppliedToolSlotSkillStats)
+                {
+                    if (kvp.Value != null && kvp.Value.Count > 0)
+                    {
+                        equipment.player.stats.RemoveItemStats(kvp.Value);
+                    }
+                }
+            }
+            AppliedToolSlotSkillStats.Clear();
+        }
+
+        public static ItemHandler.Item GetToolItemWithApplicableXpBoostsOnly(ItemHandler.ItemType slotType, ItemHandler.Item item)
+        {
+            if (item == null || item.itemXpBoosts == null || item.itemXpBoosts.Count == 0)
+                return item;
+
+            bool hasNonApplicable = false;
+            for (int i = 0; i < item.itemXpBoosts.Count; i++)
+            {
+                if (!IsSkillApplicableToToolSlot(slotType, item.itemXpBoosts[i].skillType))
+                {
+                    hasNonApplicable = true;
+                    break;
+                }
+            }
+
+            if (!hasNonApplicable)
+                return item;
+
+            ItemHandler.Item clone = MemberwiseCloneMethod?.Invoke(item, null) as ItemHandler.Item;
+            if (clone == null)
+                return item;
+
+            clone.itemXpBoosts = new List<ItemHandler.Item.ItemXpBoost>();
+            for (int i = 0; i < item.itemXpBoosts.Count; i++)
+            {
+                ItemHandler.Item.ItemXpBoost boost = item.itemXpBoosts[i];
+                if (IsSkillApplicableToToolSlot(slotType, boost.skillType))
+                {
+                    clone.itemXpBoosts.Add(boost);
+                }
+            }
+            return clone;
+        }
+
+        public static int GetPickaxeLevelFromToolSlot()
+        {
+            if (Player.instance == null || Player.instance.equipment == null)
+                return 0;
+
+            PlayerEquipment.EquipmentSlot slot = GetRawSlot(Player.instance.equipment, ToolSlotPickaxe);
+            if (slot == null || slot.itemId == 0)
+                return 0;
+
+            ItemHandler.Item item = slot.GetItem();
+            if (item == null)
+                return 0;
+
+            if (item.typeId == 872 || GetBaseItemId(item.typeId) == 872)
+                return 100;
+
+            return Mathf.Max(1, item.level);
+        }
+
+        public static float GetPickaxeBonusChanceFromToolSlot()
+        {
+            if (Player.instance == null || Player.instance.equipment == null)
+                return 0f;
+
+            PlayerEquipment.EquipmentSlot slot = GetRawSlot(Player.instance.equipment, ToolSlotPickaxe);
+            if (slot == null || slot.itemId == 0)
+                return 0f;
+
+            int baseId = GetBaseItemId(slot.itemId);
+            switch (baseId)
+            {
+                case 2033:
+                    return 0.07f;
+                case 2030:
+                    return 0.06f;
+                case 1256:
+                    return 0.05f;
+                case 1032:
+                    return 0.03f;
+                case 346:
+                    return 0.025f;
+                case 911:
+                case 9057:
+                    return 0.02f;
+                case 872:
+                    return 0.1f;
+                default:
+                    ItemHandler.Item item = slot.GetItem();
+                    if (item != null && (GetItemHarvestTool(item) == HarvestablesHandler.Tool.pickaxe || (item.itemCategory != null && item.itemCategory.Contains(ItemHandler.ItemCategory.pickaxe))))
+                    {
+                        return 0.01f;
+                    }
+                    return 0f;
+            }
+        }
+
         internal static bool TryResolveRedirectedToolSlot(PlayerEquipment equipment, out PlayerEquipment.EquipmentSlot redirectedSlot)
         {
             redirectedSlot = null;
@@ -653,7 +879,7 @@ namespace ToolSlots
                         ItemHandler.Item toolItem = toolSlot.GetItem();
                         if (TryGetToolSlotType(weaponItem, out ItemHandler.ItemType weaponToolType)
                             && weaponToolType == forcedType
-                            && weaponItem.level > toolItem.level)
+                            && GetToolEffectiveLevel(weaponItem) > GetToolEffectiveLevel(toolItem))
                         {
                             return false;
                         }
@@ -685,12 +911,13 @@ namespace ToolSlots
                             if (candidateSlot != null && candidateSlot.itemId != 0)
                             {
                                 ItemHandler.Item candidateItem = candidateSlot.GetItem();
+                                int candidateLevel = GetToolEffectiveLevel(candidateItem);
                                 if (candidateItem != null
                                     && requiredTools.Contains(GetItemHarvestTool(candidateItem))
-                                    && candidateItem.level > bestToolLevel)
+                                    && candidateLevel > bestToolLevel)
                                 {
                                     bestToolSlot = candidateSlot;
-                                    bestToolLevel = candidateItem.level;
+                                    bestToolLevel = candidateLevel;
                                 }
                             }
                         }
@@ -698,7 +925,7 @@ namespace ToolSlots
 
                     if (bestToolSlot != null)
                     {
-                        if (!weaponIsValidTool || bestToolLevel >= weaponItem.level)
+                        if (!weaponIsValidTool || bestToolLevel >= GetToolEffectiveLevel(weaponItem))
                         {
                             redirectedSlot = bestToolSlot;
                             return true;
@@ -736,6 +963,7 @@ namespace ToolSlots
             private static void Postfix(PlayerEquipment __instance)
             {
                 EnsureToolSlots(__instance);
+                ClearAllAppliedToolSlotSkillStats(__instance);
             }
         }
 
@@ -745,11 +973,24 @@ namespace ToolSlots
             private static void Prefix(PlayerEquipment __instance)
             {
                 EnsureToolSlots(__instance);
+                ClearAllAppliedToolSlotSkillStats(__instance);
             }
 
             private static void Postfix(PlayerEquipment __instance)
             {
                 EnsureToolSlots(__instance);
+                foreach (ItemHandler.ItemType slotType in CustomToolSlotTypes)
+                {
+                    PlayerEquipment.EquipmentSlot slot = GetRawSlot(__instance, slotType);
+                    if (slot != null && slot.itemId != 0 && !AppliedToolSlotSkillStats.ContainsKey(slotType))
+                    {
+                        ItemHandler.Item item = slot.GetItem();
+                        if (item != null)
+                        {
+                            ApplyToolSlotSkillStats(__instance, slotType, item);
+                        }
+                    }
+                }
                 if (UI_BottomRightTabs_Equipment.instance != null)
                 {
                     UI_BottomRightTabs_Equipment.instance.ChangeEquips();
@@ -806,29 +1047,45 @@ namespace ToolSlots
                 if (__result || __instance == null)
                     return;
 
-                // Allow Lanterns (1003 Lantern of Soulsoothing, 1005 The Priest's Lantern) equipped in the Torch/Lantern slot
-                // to also satisfy light/torch checks in dark environments.
-                if (c == ItemHandler.ItemCategory.torch)
+                EnsureToolSlots(__instance);
+                foreach (ItemHandler.ItemType slotType in CustomToolSlotTypes)
                 {
-                    PlayerEquipment.EquipmentSlot torchSlot = GetRawSlot(__instance, ToolSlotTorch);
-                    if (torchSlot != null && torchSlot.itemId != 0)
+                    PlayerEquipment.EquipmentSlot slot = GetRawSlot(__instance, slotType);
+                    if (slot != null && slot.itemId != 0)
                     {
-                        int baseId = GetBaseItemId(torchSlot.itemId);
-                        if (baseId == 1003 || baseId == 1005)
+                        ItemHandler.Item item = slot.GetItem();
+                        if (item != null)
                         {
-                            __result = true;
-                        }
-                    }
-                }
-                else if (c == ItemHandler.ItemCategory.shears)
-                {
-                    PlayerEquipment.EquipmentSlot shearsSlot = GetRawSlot(__instance, ToolSlotShears);
-                    if (shearsSlot != null && shearsSlot.itemId != 0)
-                    {
-                        int baseId = GetBaseItemId(shearsSlot.itemId);
-                        if (baseId == 988 || baseId == 791)
-                        {
-                            __result = true;
+                            if (item.itemCategory != null && item.itemCategory.Contains(c))
+                            {
+                                __result = true;
+                                return;
+                            }
+                            if (c == ItemHandler.ItemCategory.torch && (GetBaseItemId(slot.itemId) == 1003 || GetBaseItemId(slot.itemId) == 1005))
+                            {
+                                __result = true;
+                                return;
+                            }
+                            if (c == ItemHandler.ItemCategory.shears && (GetBaseItemId(slot.itemId) == 988 || GetBaseItemId(slot.itemId) == 791))
+                            {
+                                __result = true;
+                                return;
+                            }
+                            if (c == ItemHandler.ItemCategory.pickaxe && (GetItemHarvestTool(item) == HarvestablesHandler.Tool.pickaxe || GetBaseItemId(slot.itemId) == 872))
+                            {
+                                __result = true;
+                                return;
+                            }
+                            if (c == ItemHandler.ItemCategory.hatchet && GetItemHarvestTool(item) == HarvestablesHandler.Tool.hatchet)
+                            {
+                                __result = true;
+                                return;
+                            }
+                            if (c == ItemHandler.ItemCategory.fishingrod && GetItemHarvestTool(item) == HarvestablesHandler.Tool.fishingrod)
+                            {
+                                __result = true;
+                                return;
+                            }
                         }
                     }
                 }
@@ -908,6 +1165,8 @@ namespace ToolSlots
 
                 slot.itemId = itemId;
 
+                ApplyToolSlotSkillStats(__instance, toolSlotType, item);
+
                 if (AudioHandler.instance != null)
                 {
                     AudioHandler.instance.Play2DSound(ItemHandler.instance.GetItemEquipSound(itemId));
@@ -953,6 +1212,9 @@ namespace ToolSlots
                     UI_Inventory.instance.disableItemNotifications = false;
                 }
 
+                ItemHandler.Item item = slot.GetItem();
+                RemoveToolSlotSkillStats(__instance, slotType, item);
+
                 slot.itemId = 0;
 
                 if (UI_BottomRightTabs_Equipment.instance != null)
@@ -996,9 +1258,13 @@ namespace ToolSlots
                     if (slot != null && slot.itemId != 0)
                     {
                         ItemHandler.Item item = slot.GetItem();
-                        if (item != null && !__result.Contains(item))
+                        if (item != null)
                         {
-                            __result.Add(item);
+                            ItemHandler.Item filteredItem = GetToolItemWithApplicableXpBoostsOnly(slotType, item);
+                            if (filteredItem != null && !__result.Contains(filteredItem))
+                            {
+                                __result.Add(filteredItem);
+                            }
                         }
                     }
                 }
@@ -1536,12 +1802,45 @@ namespace ToolSlots
             private static void Postfix(PlayerInteract __instance)
             {
                 if (__instance == null
-                    || !(__instance.interactingObject is Interactable_Resource resource)
                     || __instance.interactTimer <= 0f
-                    || resource.requiredTools == null
-                    || resource.requiredTools.Count == 0
                     || Player.instance == null
                     || Player.instance.equipment == null)
+                {
+                    return;
+                }
+
+                // 1. Mining Tunnel Rocks & Reward Caches
+                if (__instance.interactingObject is Interactable_MiningTunnelRock || __instance.interactingObject is Interactable_MiningTunnelRewardCache)
+                {
+                    _suppressWeaponRedirect = true;
+                    PlayerEquipment.EquipmentSlot weaponSlot;
+                    try
+                    {
+                        weaponSlot = GetRawSlot(Player.instance.equipment, ItemHandler.ItemType.weapon);
+                    }
+                    finally
+                    {
+                        _suppressWeaponRedirect = false;
+                    }
+
+                    ItemHandler.Item weaponItem = weaponSlot != null && weaponSlot.itemId != 0 ? weaponSlot.GetItem() : null;
+                    bool weaponIsPickaxe = weaponItem != null && (GetItemHarvestTool(weaponItem) == HarvestablesHandler.Tool.pickaxe || (weaponItem.itemCategory != null && weaponItem.itemCategory.Contains(ItemHandler.ItemCategory.pickaxe)) || GetBaseItemId(weaponItem.typeId) == 872);
+                    if (!weaponIsPickaxe)
+                    {
+                        PlayerEquipment.EquipmentSlot pickaxeSlot = GetRawSlot(Player.instance.equipment, ToolSlotPickaxe);
+                        if (pickaxeSlot != null && pickaxeSlot.itemId != 0)
+                        {
+                            Player.instance.equipment.HideWeapon(__instance.interactTimer);
+                            Player.instance.ShowTemporaryHandItem("Pickaxe", __instance.interactTimer);
+                        }
+                    }
+                    return;
+                }
+
+                // 2. Resource harvesting
+                if (!(__instance.interactingObject is Interactable_Resource resource)
+                    || resource.requiredTools == null
+                    || resource.requiredTools.Count == 0)
                 {
                     return;
                 }
@@ -1596,6 +1895,14 @@ namespace ToolSlots
                 ActiveForcedToolSlotStack.Push(ToolSlotPickaxe);
             }
 
+            private static void Postfix(ref bool __result)
+            {
+                if (!__result && GetPickaxeLevelFromToolSlot() > 0)
+                {
+                    __result = true;
+                }
+            }
+
             private static void Finalizer()
             {
                 if (ActiveForcedToolSlotStack.Count > 0)
@@ -1607,6 +1914,49 @@ namespace ToolSlots
 
         [HarmonyPatch(typeof(MiningTunnelHandler), "GetEquippedPickaxeLevelForSpeed")]
         private static class MiningTunnelHandler_GetEquippedPickaxeLevelForSpeed_Patch
+        {
+            private static void Prefix()
+            {
+                ActiveForcedToolSlotStack.Push(ToolSlotPickaxe);
+            }
+
+            private static void Postfix(ref int __result)
+            {
+                int toolLevel = GetPickaxeLevelFromToolSlot();
+                if (toolLevel > __result)
+                {
+                    __result = toolLevel;
+                }
+            }
+
+            private static void Finalizer()
+            {
+                if (ActiveForcedToolSlotStack.Count > 0)
+                {
+                    ActiveForcedToolSlotStack.Pop();
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(MiningTunnelHandler), nameof(MiningTunnelHandler.GetRockHitInteractTime))]
+        private static class MiningTunnelHandler_GetRockHitInteractTime_Patch
+        {
+            private static void Prefix()
+            {
+                ActiveForcedToolSlotStack.Push(ToolSlotPickaxe);
+            }
+
+            private static void Finalizer()
+            {
+                if (ActiveForcedToolSlotStack.Count > 0)
+                {
+                    ActiveForcedToolSlotStack.Pop();
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(MiningTunnelHandler), nameof(MiningTunnelHandler.GetRockHitInteractDelay))]
+        private static class MiningTunnelHandler_GetRockHitInteractDelay_Patch
         {
             private static void Prefix()
             {
@@ -1645,6 +1995,15 @@ namespace ToolSlots
             private static void Prefix()
             {
                 ActiveForcedToolSlotStack.Push(ToolSlotPickaxe);
+            }
+
+            private static void Postfix(ref float __result)
+            {
+                float toolBonus = GetPickaxeBonusChanceFromToolSlot();
+                if (toolBonus > __result)
+                {
+                    __result = toolBonus;
+                }
             }
 
             private static void Finalizer()

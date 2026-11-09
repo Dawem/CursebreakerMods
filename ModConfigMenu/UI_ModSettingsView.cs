@@ -313,6 +313,51 @@ public static class UI_ModSettingsView
             }
         }
 
+        // Case 0: Action Button (entry has an Action or Action<ConfigEntryBase> in Tags)
+        Action buttonAction = entry.Description?.Tags?.OfType<Action>().FirstOrDefault();
+        if (buttonAction != null)
+        {
+            LUI_Core.instance.AddButton(
+                keyName,
+                Position.topLeft,
+                Position.topLeft,
+                new Vector2(8f, currentY),
+                new Vector2(350f, 28f),
+                _ =>
+                {
+                    AudioHandler.instance?.Play2DSound(12);
+                    buttonAction();
+                },
+                null,
+                parent);
+
+            AddTooltipIcon(365f, currentY - 5f);
+            currentY -= 36f;
+            return;
+        }
+
+        Action<ConfigEntryBase> buttonWithEntryAction = entry.Description?.Tags?.OfType<Action<ConfigEntryBase>>().FirstOrDefault();
+        if (buttonWithEntryAction != null)
+        {
+            LUI_Core.instance.AddButton(
+                keyName,
+                Position.topLeft,
+                Position.topLeft,
+                new Vector2(8f, currentY),
+                new Vector2(350f, 28f),
+                _ =>
+                {
+                    AudioHandler.instance?.Play2DSound(12);
+                    buttonWithEntryAction(entry);
+                },
+                null,
+                parent);
+
+            AddTooltipIcon(365f, currentY - 5f);
+            currentY -= 36f;
+            return;
+        }
+
         // Case 1: Boolean Toggle
         if (settingType == typeof(bool))
         {
