@@ -1,7 +1,10 @@
 using System;
 using System.ComponentModel;
+using System.Net;
+using System.Net.Http;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -24,6 +27,7 @@ public class Plugin : BaseUnityPlugin
 {
     public const string DefaultWikiUrl = "https://cursebreaker.wiki/wiki/<item name>";
     public const string CursebreakerWikiComBaseUrl = "https://cursebreakerwiki.com";
+    public const string CursebreakerWikiComSearchIndexUrl = "https://cursebreakerwiki.com/assets/search-index.js";
 
     internal static new ManualLogSource Logger;
 
@@ -38,6 +42,10 @@ public class Plugin : BaseUnityPlugin
 
     private static readonly Regex RichTextRegex = new(@"<[^>]+>", RegexOptions.Compiled);
     private static readonly Regex SlugNonAlnumRegex = new(@"[^a-z0-9]+", RegexOptions.Compiled);
+    private static readonly HttpClient WikiHttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+    private static SearchIndexEntry[] _cachedSearchIndex;
+    private static Task<SearchIndexEntry[]> _searchIndexLoadTask;
 
     private static bool _steamLookupAttempted;
     private static MethodInfo _activateOverlayToWebPageMethod;
@@ -321,6 +329,161 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
+#pragma warning disable CS0649
+    [Serializable]
+    private class SearchIndexWrapper
+    {
+        public SearchIndexEntry[] entries;
+    }
+
+    [Serializable]
+    private class SearchIndexEntry
+    {
+        public string title;
+        public string kind;
+        public string path;
+    }
+#pragma warning restore CS0649
+
+    private static async Task<HttpStatusCode?> CheckUrlStatusAsync(string url)
+    {
+        try
+        {
+            using var headRequest = new HttpRequestMessage(HttpMethod.Head, url);
+            using HttpResponseMessage headResponse = await WikiHttpClient.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead);
+            if (headResponse.StatusCode != HttpStatusCode.MethodNotAllowed)
+                return headResponse.StatusCode;
+
+            using var getRequest = new HttpRequestMessage(HttpMethod.Get, url);
+            using HttpResponseMessage getResponse = await WikiHttpClient.SendAsync(getRequest, HttpCompletionOption.ResponseHeadersRead);
+            return getResponse.StatusCode;
+        }
+        catch (Exception ex)
+        {
+            Logger?.LogWarning($"Failed to check wiki URL status for '{url}': {ex.Message}");
+            return null;
+        }
+    }
+
+    private static async Task<SearchIndexEntry[]> FetchSearchIndexAsync()
+    {
+        try
+        {
+            string raw = await WikiHttpClient.GetStringAsync(CursebreakerWikiComSearchIndexUrl);
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            int start = raw.IndexOf('[');
+            int end = raw.LastIndexOf(']');
+            if (start < 0 || end <= start)
+            {
+                Logger?.LogWarning("Unexpected format in cursebreakerwiki.com search-index.js.");
+                return null;
+            }
+
+            string arrayJson = raw.Substring(start, end - start + 1);
+            SearchIndexWrapper wrapper = JsonUtility.FromJson<SearchIndexWrapper>("{\"entries\":" + arrayJson + "}");
+            return wrapper?.entries;
+        }
+        catch (Exception ex)
+        {
+            Logger?.LogWarning($"Failed to fetch or parse cursebreakerwiki.com search-index.js: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static async Task<SearchIndexEntry[]> GetSearchIndexAsync()
+    {
+        if (_cachedSearchIndex != null)
+            return _cachedSearchIndex;
+
+        _searchIndexLoadTask ??= FetchSearchIndexAsync();
+        SearchIndexEntry[] entries = await _searchIndexLoadTask;
+        if (entries != null)
+        {
+            _cachedSearchIndex = entries;
+        }
+        else
+        {
+            _searchIndexLoadTask = null;
+        }
+
+        return entries;
+    }
+
+    private static string FindMatchingPathInIndex(SearchIndexEntry[] entries, string expectedKind, string kindPrefix, int id, string cleanName)
+    {
+        if (entries == null || entries.Length == 0)
+            return null;
+
+        string idSuffix = $"-{id}.html";
+        string pathPrefix = $"{kindPrefix}/";
+        string slug = SlugifyWikiName(cleanName);
+
+        string titleMatch = null;
+        string slugMatch = null;
+
+        foreach (SearchIndexEntry entry in entries)
+        {
+            if (entry == null || string.IsNullOrWhiteSpace(entry.path))
+                continue;
+
+            if (!string.Equals(entry.kind, expectedKind, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (entry.path.StartsWith(pathPrefix, StringComparison.OrdinalIgnoreCase) &&
+                entry.path.EndsWith(idSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return entry.path;
+            }
+
+            if (titleMatch == null &&
+                !string.IsNullOrWhiteSpace(entry.title) &&
+                string.Equals(entry.title.Trim(), cleanName, StringComparison.OrdinalIgnoreCase))
+            {
+                titleMatch = entry.path;
+            }
+
+            if (slugMatch == null &&
+                !string.IsNullOrWhiteSpace(slug) &&
+                string.Equals(SlugifyWikiName(entry.title), slug, StringComparison.OrdinalIgnoreCase))
+            {
+                slugMatch = entry.path;
+            }
+        }
+
+        return titleMatch ?? slugMatch;
+    }
+
+    private static async Task ResolveAndOpenCursebreakerWikiComUrlAsync(string builtUrl, string kindPrefix, string expectedKind, int id, string cleanName)
+    {
+        try
+        {
+            HttpStatusCode? status = await CheckUrlStatusAsync(builtUrl);
+            if (status == HttpStatusCode.NotFound)
+            {
+                Logger?.LogInfo($"Wiki page returned 404 for '{builtUrl}', falling back to search-index.js for '{cleanName}' (ID {id}).");
+                SearchIndexEntry[] entries = await GetSearchIndexAsync();
+                string matchedPath = FindMatchingPathInIndex(entries, expectedKind, kindPrefix, id, cleanName);
+                if (!string.IsNullOrWhiteSpace(matchedPath))
+                {
+                    string fallbackUrl = $"{CursebreakerWikiComBaseUrl}/{matchedPath.TrimStart('/')}";
+                    OpenWikiUrl(fallbackUrl, cleanName);
+                    return;
+                }
+
+                Logger?.LogWarning($"No matching {expectedKind} entry found in search-index.js for '{cleanName}' (ID {id}); opening built URL.");
+            }
+
+            OpenWikiUrl(builtUrl, cleanName);
+        }
+        catch (Exception ex)
+        {
+            Logger?.LogError($"Unexpected error resolving wiki URL '{builtUrl}': {ex}");
+            OpenWikiUrl(builtUrl, cleanName);
+        }
+    }
+
     private static void OpenWikiUrl(string finalUrl, string targetLabel)
     {
         if (string.IsNullOrWhiteSpace(finalUrl))
@@ -388,7 +551,11 @@ public class Plugin : BaseUnityPlugin
             return;
 
         string finalUrl = BuildCursebreakerWikiComUrl("item", baseId, baseName);
-        OpenWikiUrl(finalUrl, StripRichTextTags(baseName).Trim());
+        if (string.IsNullOrWhiteSpace(finalUrl))
+            return;
+
+        string cleanName = StripRichTextTags(baseName).Trim();
+        _ = ResolveAndOpenCursebreakerWikiComUrlAsync(finalUrl, "item", "Item", baseId, cleanName);
     }
 
     /// <summary>
@@ -417,7 +584,11 @@ public class Plugin : BaseUnityPlugin
             return;
 
         string finalUrl = BuildCursebreakerWikiComUrl("npc", npc.npcTypeId, rawName);
-        OpenWikiUrl(finalUrl, StripRichTextTags(rawName).Trim());
+        if (string.IsNullOrWhiteSpace(finalUrl))
+            return;
+
+        string cleanName = StripRichTextTags(rawName).Trim();
+        _ = ResolveAndOpenCursebreakerWikiComUrlAsync(finalUrl, "npc", "NPC", npc.npcTypeId, cleanName);
     }
 
     /// <summary>

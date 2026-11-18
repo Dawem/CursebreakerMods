@@ -74,6 +74,9 @@ namespace ToolSlots
         private static readonly AccessTools.FieldRef<UI_Inventory, UI_Inventory.ItemSlot> CurrentConsumableItemRef =
             AccessTools.FieldRefAccess<UI_Inventory, UI_Inventory.ItemSlot>("currentConsumableItem");
 
+        private static readonly AccessTools.FieldRef<Unit, GameObject> TemporaryHandItemModelRef =
+            AccessTools.FieldRefAccess<Unit, GameObject>("temporaryHandItemModel");
+
         private static readonly Action<UI_BottomRightTabs_Equipment, object[]> UnequipSlotMethod =
             AccessTools.MethodDelegate<Action<UI_BottomRightTabs_Equipment, object[]>>(
                 AccessTools.Method(typeof(UI_BottomRightTabs_Equipment), "UnequipSlot", new[] { typeof(object[]) }));
@@ -1880,10 +1883,54 @@ namespace ToolSlots
                             {
                                 Player.instance.ShowTemporaryHandItem("Pickaxe", __instance.interactTimer);
                             }
+                            else if (requiredTool == HarvestablesHandler.Tool.fishingrod)
+                            {
+                                ShowTemporaryEquipmentHandItem(toolSlot.GetItem(), __instance.interactTimer, "FishingRod");
+                            }
+                            else if (requiredTool == HarvestablesHandler.Tool.broom)
+                            {
+                                ShowTemporaryEquipmentHandItem(toolSlot.GetItem(), __instance.interactTimer);
+                            }
                             break;
                         }
                     }
                 }
+            }
+        }
+
+        private static void ShowTemporaryEquipmentHandItem(ItemHandler.Item item, float duration, string fallbackTempItemName = null)
+        {
+            if (Player.instance == null)
+                return;
+
+            if (item != null)
+            {
+                int modelId = item.copyModel != 0 ? item.copyModel : item.typeId;
+                int baseModelId = GetBaseItemId(modelId);
+                GameObject prefab = Resources.Load<GameObject>("Equipment/Mainhand/" + baseModelId);
+                Transform mainHand = Player.instance.GetMainHandTransform();
+                if (prefab != null && mainHand != null)
+                {
+                    GameObject existing = TemporaryHandItemModelRef(Player.instance);
+                    if (existing != null)
+                    {
+                        UnityEngine.Object.Destroy(existing);
+                    }
+
+                    GameObject instance = UnityEngine.Object.Instantiate(prefab);
+                    instance.transform.SetParent(mainHand);
+                    instance.transform.localPosition = Vector3.zero;
+                    instance.transform.localRotation = Quaternion.identity;
+                    instance.transform.localScale = Vector3.one;
+                    TemporaryHandItemModelRef(Player.instance) = instance;
+                    UnityEngine.Object.Destroy(instance, duration);
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(fallbackTempItemName))
+            {
+                Player.instance.ShowTemporaryHandItem(fallbackTempItemName, duration);
             }
         }
 
