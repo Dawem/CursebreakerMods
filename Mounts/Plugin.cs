@@ -40,6 +40,9 @@ public class Plugin : BaseUnityPlugin
     private static readonly AccessTools.FieldRef<DialogueHandler.Node, string> NodeNpcNameRef =
         AccessTools.FieldRefAccess<DialogueHandler.Node, string>("npcName");
 
+    private static readonly AccessTools.FieldRef<UI_RightClickMenu, int> RightClickSelectedShopIdRef =
+        AccessTools.FieldRefAccess<UI_RightClickMenu, int>("selectedShopId");
+
     private static readonly Action<UI_BottomRightTabs_Equipment, object[]> UnequipSlotMethod =
         AccessTools.MethodDelegate<Action<UI_BottomRightTabs_Equipment, object[]>>(
             AccessTools.Method(typeof(UI_BottomRightTabs_Equipment), "UnequipSlot", new[] { typeof(object[]) }));
@@ -152,7 +155,7 @@ public class Plugin : BaseUnityPlugin
             AnimIdle = 668,
             AnimWalk = 669,
             AnimRun = 669,
-            SoundId = 423,
+            SoundId = 411,
             IconItemId = 0,
             RiderXOffset = 0f,
             RiderYOffset = 0.91f,
@@ -449,15 +452,6 @@ public class Plugin : BaseUnityPlugin
         if (DebugWindowKeybind != null && DebugWindowKeybind.Value.IsDown())
         {
             ToggleDebugWindow();
-        }
-
-        if (Player.instance != null && Player.instance.stats != null)
-        {
-            var stat = Player.instance.stats.GetStat(StatsHandler.StatType.movementSpeed);
-            if (stat != null && stat.value > 8.0f)
-            {
-                SanitizeMovementSpeedStat();
-            }
         }
 
         if (!IsMounted || ActiveMount == null)
@@ -759,27 +753,8 @@ public class Plugin : BaseUnityPlugin
         }
     }
 
-    public static void SanitizeMovementSpeedStat()
-    {
-        if (Player.instance != null && Player.instance.stats != null)
-        {
-            var stat = Player.instance.stats.GetStat(StatsHandler.StatType.movementSpeed);
-            if (stat != null && stat.value > 8.0f)
-            {
-                Log?.LogWarning($"Sanitizing corrupted movementSpeed stat from {stat.value} back to 4.0");
-                stat.value = 4.0f;
-                if (Player.instance.pfinder != null)
-                {
-                    Player.instance.pfinder.runSpeed = 4.0f;
-                }
-            }
-        }
-    }
-
     private static void RefreshMovementSpeed()
     {
-        SanitizeMovementSpeedStat();
-
         if (Player.instance != null && Player.instance.pfinder != null)
         {
             float baseSpeed = Player.instance.stats != null ? Player.instance.stats.GetStatValue(StatsHandler.StatType.movementSpeed) : 4f;
@@ -835,7 +810,7 @@ public class Plugin : BaseUnityPlugin
             var item = ItemHandler.instance.GetItem(def.ItemId);
             if (item != null)
             {
-                item.copyModel = def.IconItemId;
+                item.copyModel = 0;
             }
         }
         UI_BottomRightTabs_Equipment.instance?.ChangeEquips();
@@ -1983,7 +1958,7 @@ public class Plugin : BaseUnityPlugin
                     skill = SkillsHandler.SkillType.none,
                     level = def.CombatLevel,
                     price = def.Price,
-                    copyModel = def.IconItemId,
+                    copyModel = 0,
                     stats = new List<StatsHandler.Stat>()
                 };
                 ItemToolRef(item) = HarvestablesHandler.Tool.none;
@@ -2043,9 +2018,18 @@ public class Plugin : BaseUnityPlugin
             if (path == $"Abilities/{SummonMountAbilityId}" ||
                 path == $"EquipmentSlotSilhouettes/{MountSlotType}" ||
                 path == $"EquipmentSlotSilhouettes/{(int)MountSlotType}" ||
-                path == "ItemIcons/9505")
+                path == HorseIconPath)
             {
                 tex = HorseIconPath;
+                return;
+            }
+
+            if (path.StartsWith("ItemIcons/") && int.TryParse(path.Substring("ItemIcons/".Length), out int id))
+            {
+                if (TryGetMountDefinition(id, out _))
+                {
+                    tex = HorseIconPath;
+                }
             }
         }
     }
@@ -2073,20 +2057,9 @@ public class Plugin : BaseUnityPlugin
     {
         private static void Postfix(int itemId, ref string __result)
         {
-            if (TryGetMountDefinition(itemId, out var def))
+            if (TryGetMountDefinition(itemId, out _))
             {
-                if (def.IconItemId == SummonMountAbilityId)
-                {
-                    __result = $"Abilities/{SummonMountAbilityId}";
-                }
-                else if (def.IconItemId > 0)
-                {
-                    __result = $"ItemIcons/{def.IconItemId}";
-                }
-                else
-                {
-                    __result = HorseIconPath;
-                }
+                __result = HorseIconPath;
             }
         }
     }
@@ -2260,7 +2233,6 @@ public class Plugin : BaseUnityPlugin
         {
             EnsureMountSlotExists(__instance.equipmentSlots);
             UI_BottomRightTabs_Equipment.instance?.ChangeEquips();
-            SanitizeMovementSpeedStat();
         }
     }
 
@@ -2844,18 +2816,49 @@ public class Plugin : BaseUnityPlugin
                 new Vector2(5f, -5 - counter * 25),
                 _ =>
                 {
-                    Player.instance.commands.AddCommand(new PlayerCommands.Command_Move
-                    {
-                        overrideQueue = true,
-                        customDistance = 2f,
-                        inputPosition = Utils.GetPositionFromObject(npc)
-                    });
-                    Player.instance.commands.AddCommand(new PlayerCommands.Command_Interact
-                    {
-                        target = npc,
-                        methodToCall = () => ShopHandler.instance?.OpenShop(shopId)
-                    });
                     __instance.Deactivate(null);
+                    if (npc == null)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        RightClickSelectedShopIdRef(__instance) = shopId;
+                    }
+                    catch { }
+
+                    float dist = PlayerCommands.DistanceToTargetWithoutHeight(npc);
+                    float interactDist = Mathf.Max(2.5f, npc.customInteractDistance);
+
+                    if (dist <= interactDist)
+                    {
+                        if (Player.instance != null)
+                        {
+                            Player.instance.commands?.ClearCommands();
+                            if (Player.instance.pfinder != null)
+                            {
+                                Player.instance.pfinder.moving = false;
+                            }
+                            Player.instance.LookAtPositionSmooth(npc.transform.position);
+                        }
+                        ShopHandler.instance?.OpenShop(shopId);
+                    }
+                    else
+                    {
+                        Player.instance.commands.AddCommand(new PlayerCommands.Command_Move
+                        {
+                            overrideQueue = true,
+                            customDistance = 2f,
+                            inputPosition = Utils.GetPositionFromObject(npc)
+                        });
+                        Player.instance.commands.AddCommand(new PlayerCommands.Command_Interact
+                        {
+                            target = npc,
+                            customDistance = interactDist + 1f,
+                            methodToCall = () => ShopHandler.instance?.OpenShop(shopId)
+                        });
+                    }
                 },
                 null);
             counter++;
@@ -2887,11 +2890,17 @@ public class Plugin : BaseUnityPlugin
                 targetNodeId.dialogueId = "";
                 targetNodeId.nodeId = 0;
 
+                int shopId = GetMountShopIdForNpc(__instance.currentNpc);
                 var buyMountOption = new DialogueHandler.Option
                 {
                     optionId = MountDialogueOptionId,
                     optionText = "I'd like to buy a mount.",
                     nextNode = targetNodeId,
+                    icon = "Shop",
+                    dialogueActions = new List<CBActions.CBAction>
+                    {
+                        new CBActions.CBAction { var = "OpenShop", value = shopId.ToString() }
+                    },
                     xmlChecks = new List<CBActions.CBCheck>()
                 };
 

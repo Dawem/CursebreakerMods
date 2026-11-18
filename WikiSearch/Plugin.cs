@@ -1,4 +1,6 @@
 using System;
+using System.ComponentModel;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using BepInEx;
 using BepInEx.Configuration;
@@ -9,14 +11,24 @@ using UnityEngine;
 
 namespace WikiSearch;
 
+public enum WikiSite
+{
+    [Description("cursebreakerwiki.com")]
+    CursebreakerWikiCom,
+    [Description("cursebreaker.wiki")]
+    CursebreakerWiki
+}
+
 [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
 public class Plugin : BaseUnityPlugin
 {
     public const string DefaultWikiUrl = "https://cursebreaker.wiki/wiki/<item name>";
+    public const string CursebreakerWikiComBaseUrl = "https://cursebreakerwiki.com";
 
     internal static new ManualLogSource Logger;
 
-    internal static ConfigEntry<string> WikiUrl;
+    internal static ConfigEntry<WikiSite> SelectedWiki;
+    internal static ConfigEntry<bool> OpenInSteamOverlay;
     internal static ConfigEntry<string> MenuText;
     internal static ConfigEntry<bool> EnableInventory;
     internal static ConfigEntry<bool> EnableEquipment;
@@ -25,6 +37,12 @@ public class Plugin : BaseUnityPlugin
     internal static ConfigEntry<bool> EnableMobs;
 
     private static readonly Regex RichTextRegex = new(@"<[^>]+>", RegexOptions.Compiled);
+    private static readonly Regex SlugNonAlnumRegex = new(@"[^a-z0-9]+", RegexOptions.Compiled);
+
+    private static bool _steamLookupAttempted;
+    private static MethodInfo _activateOverlayToWebPageMethod;
+    private static object _defaultOverlayWebPageMode;
+    private static MethodInfo _isOverlayEnabledMethod;
 
     private static readonly Func<ItemHandler.Item, string> GetItemNameDelegate =
         AccessTools.MethodDelegate<Func<ItemHandler.Item, string>>(
@@ -36,11 +54,17 @@ public class Plugin : BaseUnityPlugin
     {
         Logger = base.Logger;
 
-        WikiUrl = Config.Bind(
+        SelectedWiki = Config.Bind(
             "General",
-            "WikiUrl",
-            DefaultWikiUrl,
-            "The wiki URL template used to search for items, mobs, and NPCs. '<item name>', '<name>', or '<target name>' is replaced with the target name with spaces converted to underscores.");
+            "WikiSite",
+            WikiSite.CursebreakerWikiCom,
+            "Which wiki site to open when searching (CursebreakerWikiCom = https://cursebreakerwiki.com, CursebreakerWiki = https://cursebreaker.wiki).");
+
+        OpenInSteamOverlay = Config.Bind(
+            "General",
+            "Open in Steam Overlay",
+            false,
+            "When enabled, opens wiki links inside the in-game Steam Overlay browser instead of your external web browser (falls back to the external browser if the Steam Overlay is unavailable).");
 
         MenuText = Config.Bind(
             "General",
@@ -172,7 +196,155 @@ public class Plugin : BaseUnityPlugin
     }
 
     /// <summary>
-    /// Opens the wiki URL for the specified target name in the default web browser.
+    /// Converts a display name into a cursebreakerwiki.com URL slug.
+    /// </summary>
+    public static string SlugifyWikiName(string rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName))
+            return null;
+
+        string cleanName = StripRichTextTags(rawName).Trim().Replace("\u2019", string.Empty);
+        if (string.IsNullOrWhiteSpace(cleanName))
+            return null;
+
+        string slug = SlugNonAlnumRegex.Replace(cleanName.ToLowerInvariant(), "-").Trim('-');
+        return string.IsNullOrWhiteSpace(slug) ? null : slug;
+    }
+
+    /// <summary>
+    /// Strips Exceptional (+100000) and Banknote (+1000000) offsets to recover the base item typeId.
+    /// </summary>
+    public static int GetBaseItemId(int typeId)
+    {
+        int baseId = typeId;
+        if (baseId >= 1000000)
+            baseId -= 1000000;
+        if (baseId >= 100000)
+            baseId -= 100000;
+        return baseId;
+    }
+
+    /// <summary>
+    /// Builds a direct page URL for cursebreakerwiki.com from entity kind ("item" or "npc"), ID, and name.
+    /// </summary>
+    public static string BuildCursebreakerWikiComUrl(string kind, int id, string rawName)
+    {
+        string slug = SlugifyWikiName(rawName);
+        if (string.IsNullOrWhiteSpace(slug))
+            return null;
+
+        return $"{CursebreakerWikiComBaseUrl}/{kind}/{slug}-{id}.html";
+    }
+
+    private static void EnsureSteamOverlayMethods()
+    {
+        if (_steamLookupAttempted)
+            return;
+
+        _steamLookupAttempted = true;
+
+        Type steamFriendsType = AccessTools.TypeByName("Steamworks.SteamFriends");
+        if (steamFriendsType != null)
+        {
+            foreach (MethodInfo method in steamFriendsType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (method.Name != "ActivateGameOverlayToWebPage")
+                    continue;
+
+                ParameterInfo[] parameters = method.GetParameters();
+                if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
+                {
+                    _activateOverlayToWebPageMethod = method;
+                    break;
+                }
+
+                if (parameters.Length == 2 &&
+                    parameters[0].ParameterType == typeof(string) &&
+                    parameters[1].ParameterType.IsEnum)
+                {
+                    _activateOverlayToWebPageMethod = method;
+                    _defaultOverlayWebPageMode = Enum.ToObject(parameters[1].ParameterType, 0);
+                    break;
+                }
+            }
+        }
+
+        Type steamUtilsType = AccessTools.TypeByName("Steamworks.SteamUtils");
+        if (steamUtilsType != null)
+        {
+            _isOverlayEnabledMethod = AccessTools.Method(steamUtilsType, "IsOverlayEnabled", Type.EmptyTypes);
+        }
+    }
+
+    /// <summary>
+    /// Attempts to open the specified URL in the Steam Overlay web browser.
+    /// Returns false if Steam is not initialized or the Steam Overlay is unavailable.
+    /// </summary>
+    public static bool TryOpenInSteamOverlay(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return false;
+
+        try
+        {
+            if (!SteamManager.Initialized)
+            {
+                Logger?.LogDebug("Steam is not initialized; falling back to external browser.");
+                return false;
+            }
+
+            EnsureSteamOverlayMethods();
+
+            if (_isOverlayEnabledMethod != null && _isOverlayEnabledMethod.Invoke(null, null) is bool isEnabled && !isEnabled)
+            {
+                Logger?.LogWarning("Steam Overlay is disabled or unavailable; falling back to external browser.");
+                return false;
+            }
+
+            if (_activateOverlayToWebPageMethod == null)
+            {
+                Logger?.LogWarning("SteamFriends.ActivateGameOverlayToWebPage was not found; falling back to external browser.");
+                return false;
+            }
+
+            object[] args = _activateOverlayToWebPageMethod.GetParameters().Length == 2
+                ? new[] { url, _defaultOverlayWebPageMode }
+                : new object[] { url };
+
+            _activateOverlayToWebPageMethod.Invoke(null, args);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger?.LogWarning($"Failed to open URL in Steam Overlay, falling back to external browser: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void OpenWikiUrl(string finalUrl, string targetLabel)
+    {
+        if (string.IsNullOrWhiteSpace(finalUrl))
+            return;
+
+        if (OpenInSteamOverlay != null && OpenInSteamOverlay.Value && TryOpenInSteamOverlay(finalUrl))
+        {
+            Logger?.LogInfo($"Opening wiki in Steam Overlay for '{targetLabel}': {finalUrl}");
+            return;
+        }
+
+        try
+        {
+            Logger?.LogInfo($"Opening wiki in external browser for '{targetLabel}': {finalUrl}");
+            Application.OpenURL(finalUrl);
+        }
+        catch (Exception ex)
+        {
+            Logger?.LogError($"Failed to open wiki URL '{finalUrl}': {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Opens the legacy wiki URL for the specified target name in the default web browser.
     /// </summary>
     public static void OpenWikiForName(string rawName)
     {
@@ -183,16 +355,8 @@ public class Plugin : BaseUnityPlugin
         if (string.IsNullOrWhiteSpace(cleanName))
             return;
 
-        string finalUrl = BuildWikiUrl(WikiUrl?.Value, cleanName);
-        try
-        {
-            Logger?.LogInfo($"Opening wiki for '{cleanName}': {finalUrl}");
-            Application.OpenURL(finalUrl);
-        }
-        catch (Exception ex)
-        {
-            Logger?.LogError($"Failed to open wiki URL '{finalUrl}': {ex}");
-        }
+        string finalUrl = BuildWikiUrl(DefaultWikiUrl, cleanName);
+        OpenWikiUrl(finalUrl, cleanName);
     }
 
     /// <summary>
@@ -203,11 +367,28 @@ public class Plugin : BaseUnityPlugin
         if (item == null)
             return;
 
-        string rawName = GetItemDisplayName(item);
-        if (string.IsNullOrWhiteSpace(rawName))
+        WikiSite site = SelectedWiki?.Value ?? WikiSite.CursebreakerWikiCom;
+        if (site == WikiSite.CursebreakerWiki)
+        {
+            string rawName = GetItemDisplayName(item);
+            if (string.IsNullOrWhiteSpace(rawName))
+                return;
+
+            OpenWikiForName(rawName);
+            return;
+        }
+
+        int baseId = GetBaseItemId(item.typeId);
+        ItemHandler.Item targetItem = baseId != item.typeId && ItemHandler.instance != null
+            ? ItemHandler.instance.GetItem(baseId) ?? item
+            : item;
+
+        string baseName = GetItemDisplayName(targetItem);
+        if (string.IsNullOrWhiteSpace(baseName))
             return;
 
-        OpenWikiForName(rawName);
+        string finalUrl = BuildCursebreakerWikiComUrl("item", baseId, baseName);
+        OpenWikiUrl(finalUrl, StripRichTextTags(baseName).Trim());
     }
 
     /// <summary>
@@ -215,10 +396,28 @@ public class Plugin : BaseUnityPlugin
     /// </summary>
     public static void OpenWikiForNpc(NPC npc)
     {
-        if (npc == null || string.IsNullOrWhiteSpace(npc.npcName))
+        if (npc == null)
             return;
 
-        OpenWikiForName(npc.npcName);
+        WikiSite site = SelectedWiki?.Value ?? WikiSite.CursebreakerWikiCom;
+        if (site == WikiSite.CursebreakerWiki)
+        {
+            if (string.IsNullOrWhiteSpace(npc.npcName))
+                return;
+
+            OpenWikiForName(npc.npcName);
+            return;
+        }
+
+        string templateName = NPCHandler.instance != null
+            ? NPCHandler.instance.getNpcTemplate(npc.npcTypeId)?.npcName
+            : null;
+        string rawName = !string.IsNullOrWhiteSpace(templateName) ? templateName : npc.npcName;
+        if (string.IsNullOrWhiteSpace(rawName))
+            return;
+
+        string finalUrl = BuildCursebreakerWikiComUrl("npc", npc.npcTypeId, rawName);
+        OpenWikiUrl(finalUrl, StripRichTextTags(rawName).Trim());
     }
 
     /// <summary>

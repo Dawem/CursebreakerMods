@@ -21,6 +21,8 @@ public class Plugin : BaseUnityPlugin
 
     internal static ConfigEntry<bool> AutoRespawnEnabled;
     internal static ConfigEntry<bool> RespawnAllBosses;
+    internal static ConfigEntry<bool> AlwaysShowRespawnButton;
+    internal static ConfigEntry<string> KnownBossTypeIdsConfig;
     internal static ConfigEntry<KeyboardShortcut> ToggleKey;
 
     private readonly Harmony _harmony = new(MyPluginInfo.PLUGIN_GUID);
@@ -41,9 +43,21 @@ public class Plugin : BaseUnityPlugin
 
         RespawnAllBosses = Config.Bind(
             "General",
-            "Respawn All Bosses",
-            false,
+            "Respawn Bosses",
+            true,
             "When enabled, all boss enemies are included when respawning nearby enemies (both automatically and via the respawn interface). Individual bosses can also be toggled in the respawn interface.");
+
+        AlwaysShowRespawnButton = Config.Bind(
+            "General",
+            "Always Show Respawn Button",
+            false,
+            "When enabled, the respawn interface button remains visible on the HUD even when auto-respawn is off and no nearby mobs are respawning.");
+
+        KnownBossTypeIdsConfig = Config.Bind(
+            "General",
+            "Known Boss Type IDs",
+            "118,191,238,482,489,598,624,748,844,908,1538,9074,9200,9203",
+            "Comma-separated list of NPC type IDs treated as boss enemies in addition to the game's boss flag and boss health bar.");
 
         ToggleKey = Config.Bind(
             "Keybinds",
@@ -53,8 +67,15 @@ public class Plugin : BaseUnityPlugin
 
         AutoRespawnEnabled.SettingChanged += (_, _) => OnSettingsChanged();
         RespawnAllBosses.SettingChanged += (_, _) => OnSettingsChanged();
+        AlwaysShowRespawnButton.SettingChanged += (_, _) => OnSettingsChanged();
+        KnownBossTypeIdsConfig.SettingChanged += (_, _) =>
+        {
+            RespawnManager.LoadKnownBossTypeIds();
+            OnSettingsChanged();
+        };
 
-        RespawnManager.LoadSelectedBosses();
+        RespawnManager.LoadKnownBossTypeIds();
+        RespawnManager.LoadSavedSelections();
 
         _harmony.PatchAll();
         Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_NAME} ({MyPluginInfo.PLUGIN_GUID}) is loaded!");
@@ -207,8 +228,31 @@ internal static class RespawnManager
 {
     internal const float RespawnRange = 15f;
     private const string SelectedBossesPrefsKey = "ToggleMobRespawn_SelectedBosses";
+    private const string DisabledMobsPrefsKey = "ToggleMobRespawn_DisabledMobs";
 
-    internal sealed class SelectedBossEntry
+    // Dedicated boss encounter NPCs configured via KnownBossTypeIdsConfig, supplementing NPCTemplate.bossLoot
+    private static readonly HashSet<int> KnownBossTypeIds = new();
+
+    internal static void LoadKnownBossTypeIds()
+    {
+        KnownBossTypeIds.Clear();
+        string raw = Plugin.KnownBossTypeIdsConfig?.Value;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return;
+        }
+
+        string[] parts = raw.Split(',');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (int.TryParse(parts[i].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int typeId))
+            {
+                KnownBossTypeIds.Add(typeId);
+            }
+        }
+    }
+
+    internal sealed class SavedMobEntry
     {
         public string Key;
         public int NpcTypeId;
@@ -216,12 +260,30 @@ internal static class RespawnManager
         public string Name;
     }
 
-    private static readonly Dictionary<string, SelectedBossEntry> SelectedBosses = new(StringComparer.Ordinal);
-
-    internal static void LoadSelectedBosses()
+    internal sealed class NearbyMobEntry
     {
-        SelectedBosses.Clear();
-        string raw = PlayerPrefs.GetString(SelectedBossesPrefsKey, string.Empty);
+        public string Key;
+        public int NpcTypeId;
+        public Vector3 Pos;
+        public string Name;
+        public bool IsBoss;
+        public float Distance;
+        public NPCHandler.RespawningNpc RespawningNpc;
+    }
+
+    private static readonly Dictionary<string, SavedMobEntry> EnabledBosses = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, SavedMobEntry> DisabledMobs = new(StringComparer.Ordinal);
+
+    internal static void LoadSavedSelections()
+    {
+        LoadEntryDictionary(SelectedBossesPrefsKey, EnabledBosses);
+        LoadEntryDictionary(DisabledMobsPrefsKey, DisabledMobs);
+    }
+
+    private static void LoadEntryDictionary(string prefsKey, Dictionary<string, SavedMobEntry> target)
+    {
+        target.Clear();
+        string raw = PlayerPrefs.GetString(prefsKey, string.Empty);
         if (string.IsNullOrEmpty(raw))
         {
             return;
@@ -240,9 +302,9 @@ internal static class RespawnManager
             string key = pipeIdx >= 0 ? entry.Substring(0, pipeIdx) : entry;
             string name = pipeIdx >= 0 ? entry.Substring(pipeIdx + 1) : string.Empty;
 
-            if (TryParseBossKey(key, out int npcTypeId, out Vector3 pos))
+            if (TryParseMobKey(key, out int npcTypeId, out Vector3 pos))
             {
-                SelectedBosses[key] = new SelectedBossEntry
+                target[key] = new SavedMobEntry
                 {
                     Key = key,
                     NpcTypeId = npcTypeId,
@@ -253,27 +315,27 @@ internal static class RespawnManager
         }
     }
 
-    private static void SaveSelectedBosses()
+    private static void SaveEntryDictionary(string prefsKey, Dictionary<string, SavedMobEntry> source)
     {
-        if (SelectedBosses.Count == 0)
+        if (source.Count == 0)
         {
-            PlayerPrefs.DeleteKey(SelectedBossesPrefsKey);
+            PlayerPrefs.DeleteKey(prefsKey);
             PlayerPrefs.Save();
             return;
         }
 
-        var serialized = new List<string>(SelectedBosses.Count);
-        foreach (SelectedBossEntry entry in SelectedBosses.Values)
+        var serialized = new List<string>(source.Count);
+        foreach (SavedMobEntry entry in source.Values)
         {
             string safeName = (entry.Name ?? string.Empty).Replace(";", string.Empty).Replace("|", string.Empty);
             serialized.Add($"{entry.Key}|{safeName}");
         }
 
-        PlayerPrefs.SetString(SelectedBossesPrefsKey, string.Join(";", serialized));
+        PlayerPrefs.SetString(prefsKey, string.Join(";", serialized));
         PlayerPrefs.Save();
     }
 
-    internal static string GetBossKey(int npcTypeId, Vector3 pos)
+    internal static string GetMobKey(int npcTypeId, Vector3 pos)
     {
         return string.Format(
             CultureInfo.InvariantCulture,
@@ -284,7 +346,7 @@ internal static class RespawnManager
             pos.z);
     }
 
-    private static bool TryParseBossKey(string key, out int npcTypeId, out Vector3 pos)
+    private static bool TryParseMobKey(string key, out int npcTypeId, out Vector3 pos)
     {
         npcTypeId = 0;
         pos = Vector3.zero;
@@ -321,73 +383,250 @@ internal static class RespawnManager
         return true;
     }
 
-    internal static bool IsBossSelected(NPCHandler.RespawningNpc npc)
+    internal static bool IsMobRespawnEnabled(int npcTypeId, Vector3 pos)
     {
-        if (npc == null)
+        string key = GetMobKey(npcTypeId, pos);
+        if (IsBoss(npcTypeId))
         {
-            return false;
+            return Plugin.RespawnAllBosses.Value
+                ? !DisabledMobs.ContainsKey(key)
+                : EnabledBosses.ContainsKey(key);
         }
 
-        return SelectedBosses.ContainsKey(GetBossKey(npc.npcTypeId, npc.pos));
+        return !DisabledMobs.ContainsKey(key);
     }
 
-    internal static bool IsBossSelected(string key)
+    internal static void SetMobRespawnEnabled(int npcTypeId, Vector3 pos, string name, bool enabled)
     {
-        return !string.IsNullOrEmpty(key) && SelectedBosses.ContainsKey(key);
-    }
-
-    internal static void SetBossSelected(int npcTypeId, Vector3 pos, string name, bool selected)
-    {
-        string key = GetBossKey(npcTypeId, pos);
-        if (selected)
+        string key = GetMobKey(npcTypeId, pos);
+        var entry = new SavedMobEntry
         {
-            SelectedBosses[key] = new SelectedBossEntry
+            Key = key,
+            NpcTypeId = npcTypeId,
+            Pos = pos,
+            Name = name ?? string.Empty
+        };
+
+        if (IsBoss(npcTypeId))
+        {
+            if (enabled)
             {
-                Key = key,
-                NpcTypeId = npcTypeId,
-                Pos = pos,
-                Name = name ?? string.Empty
-            };
+                DisabledMobs.Remove(key);
+                if (!Plugin.RespawnAllBosses.Value)
+                {
+                    EnabledBosses[key] = entry;
+                }
+            }
+            else
+            {
+                EnabledBosses.Remove(key);
+                if (Plugin.RespawnAllBosses.Value)
+                {
+                    DisabledMobs[key] = entry;
+                }
+            }
+
+            SaveEntryDictionary(SelectedBossesPrefsKey, EnabledBosses);
+            SaveEntryDictionary(DisabledMobsPrefsKey, DisabledMobs);
+            return;
+        }
+
+        if (enabled)
+        {
+            DisabledMobs.Remove(key);
         }
         else
         {
-            SelectedBosses.Remove(key);
+            DisabledMobs[key] = entry;
         }
 
-        SaveSelectedBosses();
+        SaveEntryDictionary(DisabledMobsPrefsKey, DisabledMobs);
     }
 
-    internal static List<SelectedBossEntry> GetNearbyActiveSelectedBosses(List<NPCHandler.RespawningNpc> listedBosses)
+    internal static List<NearbyMobEntry> GetNearbyMobs(out int totalRespawningCount)
     {
-        var result = new List<SelectedBossEntry>();
-        if (SelectedBosses.Count == 0 || Player.instance == null)
+        totalRespawningCount = 0;
+        var result = new List<NearbyMobEntry>();
+        if (NPCHandler.instance == null || Player.instance == null)
         {
             return result;
         }
 
-        var listedKeys = new HashSet<string>(StringComparer.Ordinal);
-        if (listedBosses != null)
+        var respawningByKey = new Dictionary<string, NPCHandler.RespawningNpc>(StringComparer.Ordinal);
+        List<NPCHandler.RespawningNpc> allRespawning = NPCHandler.instance.respawningNpcs;
+        if (allRespawning != null)
         {
-            for (int i = 0; i < listedBosses.Count; i++)
+            for (int i = 0; i < allRespawning.Count; i++)
             {
-                listedKeys.Add(GetBossKey(listedBosses[i].npcTypeId, listedBosses[i].pos));
+                NPCHandler.RespawningNpc npc = allRespawning[i];
+                if (!IsEligibleForRespawn(npc))
+                {
+                    continue;
+                }
+
+                totalRespawningCount++;
+                string key = GetMobKey(npc.npcTypeId, npc.pos);
+                if (!respawningByKey.ContainsKey(key))
+                {
+                    respawningByKey[key] = npc;
+                }
             }
         }
 
-        foreach (SelectedBossEntry entry in SelectedBosses.Values)
+        var activeByUniqueId = new Dictionary<int, NPC>();
+        List<NPC> activeNpcs = NPCHandler.instance.activeNpcs;
+        if (activeNpcs != null)
         {
-            if (listedKeys.Contains(entry.Key))
+            for (int i = 0; i < activeNpcs.Count; i++)
+            {
+                NPC activeNpc = activeNpcs[i];
+                if (activeNpc != null && !activeNpc.instantiated)
+                {
+                    activeByUniqueId[activeNpc.uniqueId] = activeNpc;
+                }
+            }
+        }
+
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+        List<NPCHandler.NPCSpawner> spawners = NPCHandler.instance.npcSpawners;
+        if (spawners != null)
+        {
+            for (int i = 0; i < spawners.Count; i++)
+            {
+                NPCHandler.NPCSpawner spawner = spawners[i];
+                if (spawner == null)
+                {
+                    continue;
+                }
+
+                string key = GetMobKey(spawner.typeId, spawner.startingPosition);
+                if (seenKeys.Contains(key))
+                {
+                    continue;
+                }
+
+                respawningByKey.TryGetValue(key, out NPCHandler.RespawningNpc respawningNpc);
+                NPCHandler.NPCTemplate template = NPCHandler.instance.getNpcTemplate(spawner.typeId);
+                if (!IsMobTemplate(template, respawningNpc != null))
+                {
+                    continue;
+                }
+
+                activeByUniqueId.TryGetValue(spawner.uniqueId, out NPC activeNpc);
+                float startDist = OlipaRuntimeUtils.DistanceToPlayer(spawner.startingPosition);
+                float liveDist = activeNpc != null && !activeNpc.dead
+                    ? OlipaRuntimeUtils.DistanceToPlayer(activeNpc.transform.position)
+                    : float.MaxValue;
+                float dist = Mathf.Min(startDist, liveDist);
+
+                if (respawningNpc == null && dist >= RespawnRange)
+                {
+                    continue;
+                }
+
+                if (respawningNpc == null && !IsLiveSpawnerVisible(spawner))
+                {
+                    continue;
+                }
+
+                seenKeys.Add(key);
+                string mobName = !string.IsNullOrEmpty(spawner.npcName)
+                    ? spawner.npcName
+                    : GetNpcDisplayName(spawner.typeId);
+
+                result.Add(new NearbyMobEntry
+                {
+                    Key = key,
+                    NpcTypeId = spawner.typeId,
+                    Pos = spawner.startingPosition,
+                    Name = mobName,
+                    IsBoss = IsBoss(spawner.typeId),
+                    Distance = respawningNpc != null ? startDist : dist,
+                    RespawningNpc = respawningNpc
+                });
+            }
+        }
+
+        // Fallback for any eligible respawning entry not matched to a spawner above
+        foreach (KeyValuePair<string, NPCHandler.RespawningNpc> kvp in respawningByKey)
+        {
+            if (seenKeys.Contains(kvp.Key))
             {
                 continue;
             }
 
-            if (OlipaRuntimeUtils.DistanceToPlayer(entry.Pos) < RespawnRange)
+            NPCHandler.RespawningNpc npc = kvp.Value;
+            result.Add(new NearbyMobEntry
             {
-                result.Add(entry);
-            }
+                Key = kvp.Key,
+                NpcTypeId = npc.npcTypeId,
+                Pos = npc.pos,
+                Name = GetNpcDisplayName(npc.npcTypeId),
+                IsBoss = IsBoss(npc.npcTypeId),
+                Distance = OlipaRuntimeUtils.DistanceToPlayer(npc.pos),
+                RespawningNpc = npc
+            });
         }
 
+        result.Sort((a, b) =>
+        {
+            bool aDead = a.RespawningNpc != null;
+            bool bDead = b.RespawningNpc != null;
+            if (aDead != bDead)
+            {
+                return aDead ? -1 : 1;
+            }
+
+            if (aDead)
+            {
+                int timeCmp = a.RespawningNpc.time.CompareTo(b.RespawningNpc.time);
+                if (timeCmp != 0)
+                {
+                    return timeCmp;
+                }
+            }
+
+            int distCmp = a.Distance.CompareTo(b.Distance);
+            return distCmp != 0
+                ? distCmp
+                : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+        });
+
         return result;
+    }
+
+    private static bool IsMobTemplate(NPCHandler.NPCTemplate template, bool isCurrentlyRespawning)
+    {
+        if (template == null)
+        {
+            return isCurrentlyRespawning;
+        }
+
+        if (!template.canFight || template.unitTags.Contains(21))
+        {
+            return false;
+        }
+
+        return template.respawnTime > 0 || isCurrentlyRespawning;
+    }
+
+    private static bool IsLiveSpawnerVisible(NPCHandler.NPCSpawner spawner)
+    {
+        if (spawner == null || NPCHandler.instance == null || CBActions.instance == null)
+        {
+            return false;
+        }
+
+        return NPCHandler.instance.NpcSpawnerIsVisible(spawner) &&
+               CBActions.instance.CheckCBChecks(spawner.spawnerChecks, spawner);
+    }
+
+    private static string GetNpcDisplayName(int npcTypeId)
+    {
+        NPCHandler.NPCTemplate template = NPCHandler.instance?.getNpcTemplate(npcTypeId);
+        return template != null && !string.IsNullOrEmpty(template.npcName)
+            ? template.npcName
+            : $"NPC #{npcTypeId}";
     }
 
     internal static void TryAutoRespawn()
@@ -397,16 +636,17 @@ internal static class RespawnManager
             return;
         }
 
-        int respawned = RespawnNearby(respawnTimeValue: 1, out _);
+        int respawned = RespawnNearby(respawnTimeValue: 1, out _, out _);
         if (respawned > 0)
         {
             RespawnUIHelpers.RefreshUI();
         }
     }
 
-    internal static int RespawnNearby(int respawnTimeValue, out int skippedBossCount)
+    internal static int RespawnNearby(int respawnTimeValue, out int skippedBossCount, out int skippedDisabledCount)
     {
         skippedBossCount = 0;
+        skippedDisabledCount = 0;
         if (NPCHandler.instance == null || NPCHandler.instance.respawningNpcs == null || Player.instance == null)
         {
             return 0;
@@ -422,9 +662,17 @@ internal static class RespawnManager
                 continue;
             }
 
-            if (!ShouldRespawnBoss(npc))
+            if (!IsMobRespawnEnabled(npc.npcTypeId, npc.pos))
             {
-                skippedBossCount++;
+                if (IsBoss(npc) && !Plugin.RespawnAllBosses.Value)
+                {
+                    skippedBossCount++;
+                }
+                else
+                {
+                    skippedDisabledCount++;
+                }
+
                 continue;
             }
 
@@ -435,9 +683,30 @@ internal static class RespawnManager
         return respawnedCount;
     }
 
-    internal static bool ShouldRespawnBoss(NPCHandler.RespawningNpc npc)
+    internal static bool IsBoss(NPCHandler.RespawningNpc npc)
     {
-        return Plugin.RespawnAllBosses.Value || IsBossSelected(npc);
+        return npc != null && IsBoss(npc.npcTypeId);
+    }
+
+    internal static bool IsBoss(int npcTypeId)
+    {
+        NPCHandler.NPCTemplate template = NPCHandler.instance?.getNpcTemplate(npcTypeId);
+        if (template != null && template.bossLoot)
+        {
+            return true;
+        }
+
+        if (KnownBossTypeIds.Contains(npcTypeId))
+        {
+            return true;
+        }
+
+        if (UI_BossHealthBar.instance != null && UI_BossHealthBar.instance.bossTypeId == npcTypeId)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     internal static bool IsEligibleForRespawn(NPCHandler.RespawningNpc respawningNpc)
@@ -487,7 +756,16 @@ internal static class RespawnManager
             return false;
         }
 
-        return CBActions.instance.CheckCBChecks(matched.visibilityChecks, UI_RespawningNpcs.instance);
+        NPCHandler.NPCTemplate template = NPCHandler.instance.getNpcTemplate(respawningNpc.npcTypeId);
+        if (template != null &&
+            template.visibilityChecks != null &&
+            template.visibilityChecks.Count > 0 &&
+            !CBActions.instance.CheckCBChecks(template.visibilityChecks, template))
+        {
+            return false;
+        }
+
+        return CBActions.instance.CheckCBChecks(matched.visibilityChecks, (object)UI_RespawningNpcs.instance ?? matched);
     }
 }
 
@@ -502,10 +780,10 @@ public static class RespawnUIPatch
     }
 
     [HarmonyPatch("CheckActive")]
-    [HarmonyPostfix]
-    public static void CheckActive_Postfix(UI_RespawningNpcs __instance)
+    [HarmonyPrefix]
+    public static bool CheckActive_Prefix(UI_RespawningNpcs __instance)
     {
-        RespawnUIHelpers.OnCheckActive(__instance);
+        return RespawnUIHelpers.OnCheckActivePrefix(__instance);
     }
 
     [HarmonyPatch("Tick")]
@@ -574,19 +852,41 @@ internal static class RespawnUIHelpers
         UpdateButtonAppearance();
     }
 
-    internal static void OnCheckActive(UI_RespawningNpcs instance)
+    internal static bool OnCheckActivePrefix(UI_RespawningNpcs instance)
     {
         if (instance == null || Player.instance == null)
         {
-            return;
+            return false;
         }
 
-        if (Plugin.AutoRespawnEnabled.Value && !Player.instance.IsInCombat() && !Player.instance.dead && !instance.active)
+        bool alwaysShow = Plugin.AlwaysShowRespawnButton.Value;
+        if (Player.instance.dead || (!alwaysShow && Player.instance.IsInCombat()))
         {
-            SetActiveDelegate(instance, true);
+            instance.respawningNpcsCount = 0;
+            SetActiveDelegate(instance, false);
+            UpdateButtonAppearance();
+            return false;
         }
 
+        int eligibleCount = 0;
+        List<NPCHandler.RespawningNpc> allRespawning = NPCHandler.instance?.respawningNpcs;
+        if (allRespawning != null)
+        {
+            for (int i = 0; i < allRespawning.Count; i++)
+            {
+                if (RespawnManager.IsEligibleForRespawn(allRespawning[i]))
+                {
+                    eligibleCount++;
+                }
+            }
+        }
+
+        instance.respawningNpcsCount = eligibleCount;
+
+        bool shouldBeActive = alwaysShow || eligibleCount > 0 || Plugin.AutoRespawnEnabled.Value;
+        SetActiveDelegate(instance, shouldBeActive);
         UpdateButtonAppearance();
+        return false;
     }
 
     internal static bool OnTickPrefix(UI_RespawningNpcs instance)
@@ -602,13 +902,27 @@ internal static class RespawnUIHelpers
 
     internal static bool OnRespawn(UI_RespawningNpcs instance)
     {
+        if (Player.instance != null && Player.instance.IsInCombat())
+        {
+            UI_Chatbox.instance?.AddChatMessage("You cannot respawn nearby enemies while in combat!", UI_Chatbox.MessageType.gameplay);
+            return false;
+        }
+
         int respawned = RespawnManager.RespawnNearby(
             respawnTimeValue: 2,
-            out int skippedBosses);
+            out int skippedBosses,
+            out int skippedDisabled);
 
-        if (respawned == 0 && skippedBosses > 0)
+        if (respawned == 0)
         {
-            UI_Notifications.instance?.ShowNotification("Boss respawn is disabled. Toggle 'Respawn All Bosses' or select individual bosses.");
+            if (skippedBosses > 0 && skippedDisabled == 0)
+            {
+                UI_Notifications.instance?.ShowNotification("Boss respawn is disabled. Toggle 'Respawn Bosses' or enable individual bosses.");
+            }
+            else if (skippedDisabled > 0 || skippedBosses > 0)
+            {
+                UI_Notifications.instance?.ShowNotification("No enabled mobs to respawn nearby. Toggle mobs on to respawn them.");
+            }
         }
 
         HideDelegate(instance);
@@ -643,38 +957,13 @@ internal static class RespawnUIHelpers
             instance.container_npcs.Destroy();
         }
 
-        var eligibleNpcs = new List<NPCHandler.RespawningNpc>();
-        int totalEligibleCount = 0;
+        List<RespawnManager.NearbyMobEntry> nearbyMobs = RespawnManager.GetNearbyMobs(out int totalRespawningCount);
+        instance.respawningNpcsCount = totalRespawningCount;
 
-        if (NPCHandler.instance?.respawningNpcs != null)
-        {
-            NPCHandler.instance.respawningNpcs = NPCHandler.instance.respawningNpcs
-                .OrderBy(x => x?.time ?? int.MaxValue)
-                .ToList();
-
-            List<NPCHandler.RespawningNpc> allRespawning = NPCHandler.instance.respawningNpcs;
-            for (int i = 0; i < allRespawning.Count; i++)
-            {
-                NPCHandler.RespawningNpc npc = allRespawning[i];
-                if (!RespawnManager.IsEligibleForRespawn(npc))
-                {
-                    continue;
-                }
-
-                totalEligibleCount++;
-                if (eligibleNpcs.Count < MaxDisplayedEntries)
-                {
-                    eligibleNpcs.Add(npc);
-                }
-            }
-        }
-
-        instance.respawningNpcsCount = totalEligibleCount;
-        List<RespawnManager.SelectedBossEntry> activePinnedBosses = RespawnManager.GetNearbyActiveSelectedBosses(eligibleNpcs);
-
-        if (totalEligibleCount == 0 &&
-            activePinnedBosses.Count == 0 &&
-            (!Plugin.AutoRespawnEnabled.Value || Player.instance == null || Player.instance.IsInCombat() || Player.instance.dead))
+        bool alwaysShow = Plugin.AlwaysShowRespawnButton.Value;
+        if (Player.instance == null ||
+            Player.instance.dead ||
+            (!alwaysShow && (Player.instance.IsInCombat() || (totalRespawningCount == 0 && !Plugin.AutoRespawnEnabled.Value))))
         {
             HideDelegate(instance);
             SetActiveDelegate(instance, false);
@@ -691,7 +980,7 @@ internal static class RespawnUIHelpers
         instance.container_npcs = panel;
 
         int row = 0;
-        int count = totalEligibleCount;
+        int count = totalRespawningCount;
         string header = $"{count} {(count == 1 ? "enemy" : "enemies")} respawning nearby:";
 
         LUI_Text headerText = LUI_Core.AddText(
@@ -708,72 +997,51 @@ internal static class RespawnUIHelpers
         row++;
 
         var navItems = new List<LUI_NavItem>();
+        const float textX = 30f;
 
-        // Every enemy/boss in the respawn interface gets its own selective auto-respawn toggle
-        for (int i = 0; i < eligibleNpcs.Count; i++)
+        int displayCount = Mathf.Min(nearbyMobs.Count, MaxDisplayedEntries);
+        for (int i = 0; i < displayCount; i++)
         {
-            NPCHandler.RespawningNpc npc = eligibleNpcs[i];
+            RespawnManager.NearbyMobEntry entry = nearbyMobs[i];
             float rowY = -5f - row * RowHeight;
-            string npcName = GetNpcDisplayName(npc.npcTypeId);
+            bool isEnabled = RespawnManager.IsMobRespawnEnabled(entry.NpcTypeId, entry.Pos);
 
-            int capturedTypeId = npc.npcTypeId;
-            Vector3 capturedPos = npc.pos;
-            LUI_ToggleButton npcToggle = CreatePanelToggle(
-                string.Empty,
-                new Vector2(6f, rowY),
-                panel.rectTransform,
-                RespawnManager.IsBossSelected(npc),
-                isOn => OnIndividualBossToggled(capturedTypeId, capturedPos, npcName, isOn));
+            string bossSuffix = entry.IsBoss ? " [Boss]" : string.Empty;
+            string labelText = entry.RespawningNpc != null
+                ? $"{entry.RespawningNpc.time} - {entry.Name}{bossSuffix}"
+                : $"Alive - {entry.Name}{bossSuffix}";
 
-            if (npcToggle?.navItem != null)
+            Color textColor;
+            if (!isEnabled)
             {
-                navItems.Add(npcToggle.navItem);
+                textColor = Utils.Color255(135f, 135f, 135f);
+            }
+            else if (entry.IsBoss)
+            {
+                textColor = Utils.Color255(255f, 215f, 120f);
+            }
+            else if (entry.RespawningNpc == null)
+            {
+                textColor = Utils.Color255(160f, 225f, 160f);
+            }
+            else
+            {
+                textColor = Utils.Color255(200f, 200f, 200f);
             }
 
-            LUI_Text npcText = LUI_Core.AddText(
-                TextAnchor.MiddleLeft,
-                Position.topLeft,
-                Position.topLeft,
-                new Vector2(30f, rowY),
-                new Vector2(500f, 25f),
-                panel,
-                $"{npc.time} - {npcName}");
-            npcText.SetTextColor(Utils.Color255(200f, 200f, 200f));
-            maxWidth = Mathf.Max(maxWidth, 30f + npcText.GetPreferredWidth() + 10f);
-            row++;
-        }
-
-        // Nearby entries pinned for auto-respawn that are currently alive (so user can uncheck them anytime)
-        for (int i = 0; i < activePinnedBosses.Count; i++)
-        {
-            RespawnManager.SelectedBossEntry entry = activePinnedBosses[i];
-            float rowY = -5f - row * RowHeight;
-            string bossName = !string.IsNullOrEmpty(entry.Name) ? entry.Name : GetNpcDisplayName(entry.NpcTypeId);
-
-            int capturedTypeId = entry.NpcTypeId;
-            Vector3 capturedPos = entry.Pos;
-            LUI_ToggleButton pinnedToggle = CreatePanelToggle(
-                string.Empty,
-                new Vector2(6f, rowY),
-                panel.rectTransform,
-                RespawnManager.IsBossSelected(entry.Key),
-                isOn => OnIndividualBossToggled(capturedTypeId, capturedPos, bossName, isOn));
-
-            if (pinnedToggle?.navItem != null)
-            {
-                navItems.Add(pinnedToggle.navItem);
-            }
-
-            LUI_Text pinnedText = LUI_Core.AddText(
-                TextAnchor.MiddleLeft,
-                Position.topLeft,
-                Position.topLeft,
-                new Vector2(30f, rowY),
-                new Vector2(500f, 25f),
-                panel,
-                $"Active - {bossName}");
-            pinnedText.SetTextColor(Utils.Color255(160f, 225f, 160f));
-            maxWidth = Mathf.Max(maxWidth, 30f + pinnedText.GetPreferredWidth() + 10f);
+            maxWidth = Mathf.Max(
+                maxWidth,
+                AddMobSelectionRow(
+                    panel,
+                    rowY,
+                    textX,
+                    entry.NpcTypeId,
+                    entry.Pos,
+                    entry.Name,
+                    isEnabled,
+                    labelText,
+                    textColor,
+                    navItems));
             row++;
         }
 
@@ -818,23 +1086,51 @@ internal static class RespawnUIHelpers
         }
     }
 
-    private static void OnIndividualBossToggled(int npcTypeId, Vector3 pos, string bossName, bool isOn)
+    private static float AddMobSelectionRow(
+        LUIRect panel,
+        float rowY,
+        float textX,
+        int npcTypeId,
+        Vector3 pos,
+        string mobName,
+        bool isSelected,
+        string labelText,
+        Color textColor,
+        List<LUI_NavItem> navItems)
     {
-        RespawnManager.SetBossSelected(npcTypeId, pos, bossName, isOn);
+        LUI_ToggleButton toggle = CreatePanelToggle(
+            string.Empty,
+            new Vector2(6f, rowY),
+            panel.rectTransform,
+            isSelected,
+            isOn => OnIndividualMobToggled(npcTypeId, pos, mobName, isOn));
+
+        if (toggle?.navItem != null)
+        {
+            navItems.Add(toggle.navItem);
+        }
+
+        LUI_Text text = LUI_Core.AddText(
+            TextAnchor.MiddleLeft,
+            Position.topLeft,
+            Position.topLeft,
+            new Vector2(textX, rowY),
+            new Vector2(500f, 25f),
+            panel,
+            labelText);
+        text.SetTextColor(textColor);
+        return textX + text.GetPreferredWidth() + 10f;
+    }
+
+    private static void OnIndividualMobToggled(int npcTypeId, Vector3 pos, string mobName, bool isOn)
+    {
+        RespawnManager.SetMobRespawnEnabled(npcTypeId, pos, mobName, isOn);
         if (isOn && Plugin.AutoRespawnEnabled.Value)
         {
             RespawnManager.TryAutoRespawn();
         }
 
         RefreshUI();
-    }
-
-    private static string GetNpcDisplayName(int npcTypeId)
-    {
-        NPCHandler.NPCTemplate template = NPCHandler.instance?.getNpcTemplate(npcTypeId);
-        return template != null && !string.IsNullOrEmpty(template.npcName)
-            ? template.npcName
-            : $"NPC #{npcTypeId}";
     }
 
     private static void AddPanelToggles(LUIRect panel, float startY, List<LUI_NavItem> navItems)
@@ -850,7 +1146,7 @@ internal static class RespawnUIHelpers
             isOn => Plugin.SetAutoRespawn(isOn, playFeedback: false));
 
         LUI_ToggleButton bossToggle = CreatePanelToggle(
-            "Respawn All Bosses",
+            "Respawn Bosses",
             new Vector2(6f, startY - ToggleRowHeight),
             panel.rectTransform,
             Plugin.RespawnAllBosses.Value,
@@ -923,8 +1219,8 @@ internal static class RespawnUIHelpers
         string shortcut = Plugin.FormatShortcut(Plugin.ToggleKey.Value);
 
         UI_Cursor.instance.SetUIMouseHoverText(
-            $"Enemies respawning nearby\n" +
-            $"Auto-respawn ({autoStatus}) [{shortcut}] | Respawn All Bosses ({bossStatus})");
+            $"Nearby mobs & respawn controls\n" +
+            $"Auto-respawn ({autoStatus}) [{shortcut}] | Respawn Bosses ({bossStatus})");
     }
 
     private static void UpdateButtonAppearance()

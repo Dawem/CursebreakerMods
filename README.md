@@ -15,7 +15,7 @@ A collection of quality-of-life BepInEx mods for **The Black Grimoire: Cursebrea
 - **SkillRecipeAmounts**: Displays required item amounts on crafting recipes when viewing skills and milestones in the skill menu, matching the native UI style with configurable single-item amount visibility and inventory color-coding.
 - **StopStealingMyStuff**: Prevents NPCs (miners, woodcutters, foragers, etc.) from depleting or damaging harvestable resource nodes.
 - **ToolSlots**: Adds dedicated equipment slots for tools (axes, pickaxes, fishing rods, shovels, etc.) so they don't take up bag inventory space.
-- **WikiSearch**: Adds a right-click context menu option on items (inventory, equipment, bank), NPCs, and mobs to search for them on the wiki in your default browser (customizable wiki URL template, defaults to `https://cursebreaker.wiki/wiki/<item name>`).
+- **WikiSearch**: Adds a right-click context menu option on items (inventory, equipment, bank), NPCs, and mobs to search for them on the wiki (selectable between `cursebreakerwiki.com` [default] and `cursebreaker.wiki`, with an `Open in Steam Overlay` toggle to view pages in-game or in your external browser).
 
 ---
 
